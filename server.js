@@ -32,14 +32,13 @@ app.post('/api/auth/register', async (req, res) => {
   const { email, username, password } = req.body;
 
   try {
-    // Проверяем есть ли пользователь
-    const { data: existingUser } = await supabase
+    // Проверяем есть ли пользователь (БЕЗ .single()!)
+    const { data: existingUsers } = await supabase
       .from('users')
       .select('id')
-      .eq('email', email)
-      .single();
+      .eq('email', email);
 
-    if (existingUser) {
+    if (existingUsers && existingUsers.length > 0) {
       return res.json({ success: false, error: 'User already exists' });
     }
 
@@ -50,7 +49,7 @@ app.post('/api/auth/register', async (req, res) => {
         {
           email,
           username,
-          password_hash: password, // В продакшене используй bcrypt!
+          password_hash: password,
           bio: '',
           followers_count: 0,
           following_count: 0,
@@ -63,6 +62,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     res.json({ success: true, data: { user: data } });
   } catch (error) {
+    console.error('Register error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -75,15 +75,17 @@ app.post('/api/auth/login', async (req, res) => {
       .from('users')
       .select('*')
       .eq('email', email)
-      .eq('password_hash', password)
-      .single();
+      .eq('password_hash', password);
 
-    if (error || !data) {
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
       return res.json({ success: false, error: 'Invalid credentials' });
     }
 
-    res.json({ success: true, data: { user: data } });
+    res.json({ success: true, data: { user: data[0] } });
   } catch (error) {
+    console.error('Login error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -98,6 +100,7 @@ app.get('/api/users', async (req, res) => {
     if (error) throw error;
     res.json({ success: true, data });
   } catch (error) {
+    console.error('Get users error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -109,15 +112,17 @@ app.get('/api/users/:userId', async (req, res) => {
     const { data, error } = await supabase
       .from('users')
       .select('*')
-      .eq('id', userId)
-      .single();
+      .eq('id', userId);
 
-    if (error || !data) {
+    if (error) throw error;
+
+    if (!data || data.length === 0) {
       return res.json({ success: false, error: 'User not found' });
     }
 
-    res.json({ success: true, data });
+    res.json({ success: true, data: data[0] });
   } catch (error) {
+    console.error('Get user error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -131,12 +136,13 @@ app.post('/api/users/:userId/update', async (req, res) => {
       .from('users')
       .update({ username, bio })
       .eq('id', userId)
-      .select()
-      .single();
+      .select();
 
     if (error) throw error;
-    res.json({ success: true, data });
+
+    res.json({ success: true, data: data[0] });
   } catch (error) {
+    console.error('Update user error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -151,24 +157,45 @@ app.post('/api/users/:userId/follow/:targetUserId', async (req, res) => {
       .from('follows')
       .select('id')
       .eq('follower_id', userId)
-      .eq('following_id', targetUserId)
-      .single();
+      .eq('following_id', targetUserId);
 
-    if (existingFollow) {
+    if (existingFollow && existingFollow.length > 0) {
       return res.json({ success: false, error: 'Already following' });
     }
 
-    // ДобавляемFollow
+    // Добавляем Follow
     await supabase
       .from('follows')
       .insert([{ follower_id: userId, following_id: targetUserId }]);
 
     // Обновляем счетчики
-    await supabase.rpc('increment_followers', { user_id: targetUserId });
-    await supabase.rpc('increment_following', { user_id: userId });
+    const { data: targetUser } = await supabase
+      .from('users')
+      .select('followers_count')
+      .eq('id', targetUserId);
+
+    if (targetUser) {
+      await supabase
+        .from('users')
+        .update({ followers_count: (targetUser[0].followers_count || 0) + 1 })
+        .eq('id', targetUserId);
+    }
+
+    const { data: currentUser } = await supabase
+      .from('users')
+      .select('following_count')
+      .eq('id', userId);
+
+    if (currentUser) {
+      await supabase
+        .from('users')
+        .update({ following_count: (currentUser[0].following_count || 0) + 1 })
+        .eq('id', userId);
+    }
 
     res.json({ success: true, message: 'Followed!' });
   } catch (error) {
+    console.error('Follow error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -184,11 +211,33 @@ app.post('/api/users/:userId/unfollow/:targetUserId', async (req, res) => {
       .eq('following_id', targetUserId);
 
     // Обновляем счетчики
-    await supabase.rpc('decrement_followers', { user_id: targetUserId });
-    await supabase.rpc('decrement_following', { user_id: userId });
+    const { data: targetUser } = await supabase
+      .from('users')
+      .select('followers_count')
+      .eq('id', targetUserId);
+
+    if (targetUser) {
+      await supabase
+        .from('users')
+        .update({ followers_count: Math.max(0, (targetUser[0].followers_count || 1) - 1) })
+        .eq('id', targetUserId);
+    }
+
+    const { data: currentUser } = await supabase
+      .from('users')
+      .select('following_count')
+      .eq('id', userId);
+
+    if (currentUser) {
+      await supabase
+        .from('users')
+        .update({ following_count: Math.max(0, (currentUser[0].following_count || 1) - 1) })
+        .eq('id', userId);
+    }
 
     res.json({ success: true, message: 'Unfollowed!' });
   } catch (error) {
+    console.error('Unfollow error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -201,10 +250,9 @@ app.get('/api/users/:userId/following/:targetUserId', async (req, res) => {
       .from('follows')
       .select('id')
       .eq('follower_id', userId)
-      .eq('following_id', targetUserId)
-      .single();
+      .eq('following_id', targetUserId);
 
-    res.json({ isFollowing: !!data });
+    res.json({ isFollowing: !!(data && data.length > 0) });
   } catch (error) {
     res.json({ isFollowing: false });
   }
@@ -226,14 +274,14 @@ app.get('/api/posts', async (req, res) => {
         const { data: user } = await supabase
           .from('users')
           .select('username')
-          .eq('id', post.user_id)
-          .single();
-        return { ...post, username: user?.username };
+          .eq('id', post.user_id);
+        return { ...post, username: user?.[0]?.username || 'Unknown' };
       })
     );
 
     res.json({ success: true, data: enrichedPosts });
   } catch (error) {
+    console.error('Get posts error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -255,6 +303,7 @@ app.post('/api/posts', async (req, res) => {
     if (error) throw error;
     res.json({ success: true, data });
   } catch (error) {
+    console.error('Create post error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -266,14 +315,17 @@ app.post('/api/posts/:postId/like', async (req, res) => {
     const { data: post, error: fetchError } = await supabase
       .from('posts')
       .select('likes_count')
-      .eq('id', postId)
-      .single();
+      .eq('id', postId);
 
     if (fetchError) throw fetchError;
 
+    if (!post || post.length === 0) {
+      return res.json({ success: false, error: 'Post not found' });
+    }
+
     const { data, error } = await supabase
       .from('posts')
-      .update({ likes_count: (post.likes_count || 0) + 1 })
+      .update({ likes_count: (post[0].likes_count || 0) + 1 })
       .eq('id', postId)
       .select()
       .single();
@@ -281,6 +333,7 @@ app.post('/api/posts/:postId/like', async (req, res) => {
     if (error) throw error;
     res.json({ success: true, data });
   } catch (error) {
+    console.error('Like post error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -296,8 +349,9 @@ app.get('/api/chats', async (req, res) => {
       .or(`user1_id.eq.${userId},user2_id.eq.${userId}`);
 
     if (error) throw error;
-    res.json({ success: true, data });
+    res.json({ success: true, data: data || [] });
   } catch (error) {
+    console.error('Get chats error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -314,8 +368,9 @@ app.get('/api/messages/:chatId', async (req, res) => {
       .order('created_at', { ascending: true });
 
     if (error) throw error;
-    res.json({ success: true, data });
+    res.json({ success: true, data: data || [] });
   } catch (error) {
+    console.error('Get messages error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -341,6 +396,7 @@ app.post('/api/messages', async (req, res) => {
     io.emit('receive_message', data);
     res.json({ success: true, data });
   } catch (error) {
+    console.error('Send message error:', error);
     res.json({ success: false, error: error.message });
   }
 });
@@ -372,5 +428,3 @@ httpServer.listen(PORT, () => {
   console.log(`📡 WebSocket: ws://localhost:${PORT}`);
   console.log(`🗄️  Database: Supabase PostgreSQL\n`);
 });
-
-// Sigma Social App - PostgreSQL Database Connected
