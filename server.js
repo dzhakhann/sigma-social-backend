@@ -372,3 +372,5 @@ httpServer.listen(PORT, () => {
   console.log(`📡 WebSocket: ws://localhost:${PORT}`);
   console.log(`🗄️  Database: Supabase PostgreSQL\n`);
 });
+
+// Sigma Social App - PostgreSQL Database Connected
