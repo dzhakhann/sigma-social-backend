@@ -17,7 +17,7 @@ app.use(cors());
 app.use(express.json());
 
 // ===== SUPABASE CONFIG =====
-const SUPABASE_URL = 'https://uvbyxkrtyjqrorxnckw.supabase.co';
+const SUPABASE_URL = 'https://uvbyxkrtyjqrorxnckvw.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV2Ynl4a3J0eWpxcm9yeG5ja3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk4OTAzODYsImV4cCI6MjA5NTQ2NjM4Nn0.IOiYaLIkV4d3fjFKRn0CdFI-Sg3gFsoVfwFhqhDL5P8';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
