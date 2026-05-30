@@ -13,11 +13,18 @@ const io = new Server(httpServer, {
   cors: { origin: '*' },
 });
 
-app.use(cors());
+// ===== CORS FIX =====
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+}));
+app.options('*', cors());
+
 app.use(express.json());
 
-// ===== SUPABASE CONFIG =====
-const SUPABASE_URL = 'https://uvbyxkrtyjqrorxnckw.supabase.co';
+// ===== SUPABASE CONFIG (ИСПРАВЛЕННЫЙ URL) =====
+const SUPABASE_URL = 'https://uvbyxkrtyjqrorxnckvw.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV2Ynl4a3J0eWpxcm9yeG5ja3Z3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzk4OTAzODYsImV4cCI6MjA5NTQ2NjM4Nn0.IOiYaLIkV4d3fjFKRn0CdFI-Sg3gFsoVfwFhqhDL5P8';
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
@@ -32,7 +39,6 @@ app.post('/api/auth/register', async (req, res) => {
   const { email, username, password } = req.body;
 
   try {
-    // Проверяем есть ли пользователь (БЕЗ .single()!)
     const { data: existingUsers } = await supabase
       .from('users')
       .select('id')
@@ -42,7 +48,6 @@ app.post('/api/auth/register', async (req, res) => {
       return res.json({ success: false, error: 'User already exists' });
     }
 
-    // Создаем пользователя
     const { data, error } = await supabase
       .from('users')
       .insert([
@@ -152,7 +157,6 @@ app.post('/api/users/:userId/follow/:targetUserId', async (req, res) => {
   const { userId, targetUserId } = req.params;
 
   try {
-    // Проверяем уже ли подписан
     const { data: existingFollow } = await supabase
       .from('follows')
       .select('id')
@@ -163,12 +167,10 @@ app.post('/api/users/:userId/follow/:targetUserId', async (req, res) => {
       return res.json({ success: false, error: 'Already following' });
     }
 
-    // Добавляем Follow
     await supabase
       .from('follows')
       .insert([{ follower_id: userId, following_id: targetUserId }]);
 
-    // Обновляем счетчики
     const { data: targetUser } = await supabase
       .from('users')
       .select('followers_count')
@@ -210,7 +212,6 @@ app.post('/api/users/:userId/unfollow/:targetUserId', async (req, res) => {
       .eq('follower_id', userId)
       .eq('following_id', targetUserId);
 
-    // Обновляем счетчики
     const { data: targetUser } = await supabase
       .from('users')
       .select('followers_count')
@@ -268,7 +269,6 @@ app.get('/api/posts', async (req, res) => {
 
     if (error) throw error;
 
-    // Получаем информацию о пользователях
     const enrichedPosts = await Promise.all(
       posts.map(async (post) => {
         const { data: user } = await supabase
@@ -356,12 +356,10 @@ app.get('/api/chats', async (req, res) => {
   }
 });
 
-// ===== CREATE OR GET CHAT =====
 app.post('/api/chats/get-or-create', async (req, res) => {
   const { user1_id, user2_id } = req.body;
 
   try {
-    // Ищем существующий чат
     const { data: existingChats } = await supabase
       .from('chats')
       .select('*')
@@ -371,7 +369,6 @@ app.post('/api/chats/get-or-create', async (req, res) => {
       return res.json({ success: true, data: existingChats[0] });
     }
 
-    // Создаем новый чат
     const { data: newChat, error } = await supabase
       .from('chats')
       .insert([{ user1_id, user2_id }])
@@ -417,7 +414,6 @@ app.post('/api/messages', async (req, res) => {
 
     if (error) throw error;
 
-    // Обновляем last_message в чате
     await supabase
       .from('chats')
       .update({ last_message: content })
