@@ -249,3 +249,30 @@ const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => {
   console.log(`✅ ΣIGMA SOCIAL SERVER running on port ${PORT}`);
 });
+
+// ===== DELETE MESSAGE =====
+app.delete('/api/messages/:messageId', async (req, res) => {
+  const { messageId } = req.params;
+  try {
+    const { error } = await supabase.from('messages').delete().eq('id', messageId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Delete message error:', error);
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// ===== EDIT MESSAGE =====
+app.put('/api/messages/:messageId', async (req, res) => {
+  const { messageId } = req.params;
+  const { content } = req.body;
+  try {
+    const { data, error } = await supabase.from('messages').update({ content, is_edited: true }).eq('id', messageId).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Edit message error:', error);
+    res.json({ success: false, error: error.message });
+  }
+});
