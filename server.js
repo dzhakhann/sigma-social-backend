@@ -134,12 +134,15 @@ app.get('/api/users/:userId', async (req, res) => {
 
 app.post('/api/users/:userId/update', async (req, res) => {
   const { userId } = req.params;
-  const { username, bio } = req.body;
+  const { username, bio, avatar_url } = req.body;
 
   try {
+    const updateData = { username, bio };
+    if (avatar_url) updateData.avatar_url = avatar_url;
+
     const { data, error } = await supabase
       .from('users')
-      .update({ username, bio })
+      .update(updateData)
       .eq('id', userId)
       .select();
 
