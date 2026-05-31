@@ -304,5 +304,35 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {});
 });
 
+// STORY UPLOAD
+app.post('/api/stories/upload', async (req, res) => {
+  const { user_id, image_base64 } = req.body;
+  try {
+    const buffer = Buffer.from(image_base64, 'base64');
+    const fileName = `${user_id}_story_${Date.now()}.jpg`;
+
+    const { error } = await supabase.storage
+      .from('avatars')
+      .upload(fileName, buffer, { contentType: 'image/jpeg', upsert: true });
+
+    if (error) throw error;
+
+    const { data: urlData } = supabase.storage
+      .from('avatars')
+      .getPublicUrl(fileName);
+
+    const { data, error: dbError } = await supabase
+      .from('stories')
+      .insert([{ user_id, image_url: urlData.publicUrl }])
+      .select().single();
+
+    if (dbError) throw dbError;
+    res.json({ success: true, data });
+  } catch (error) {
+    console.error('Story upload error:', error);
+    res.json({ success: false, error: error.message });
+  }
+});
+
 const PORT = process.env.PORT || 3000;
 httpServer.listen(PORT, () => { console.log(`✅ ΣIGMA SOCIAL SERVER running on port ${PORT}`); });
