@@ -116,12 +116,19 @@ app.get('/api/posts', async (req, res) => {
     if (error) throw error;
     const enrichedPosts = await Promise.all(posts.map(async (post) => {
       const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', post.user_id);
+      const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
       let isLiked = false;
       if (userId) {
         const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
         isLiked = !!(like && like.length > 0);
       }
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_liked: isLiked };
+      return {
+        ...post,
+        username: user?.[0]?.username || 'Unknown',
+        user_avatar: user?.[0]?.avatar_url || null,
+        is_liked: isLiked,
+        comments_count: comments?.length || 0,
+      };
     }));
     res.json({ success: true, data: enrichedPosts });
   } catch (error) { res.json({ success: false, error: error.message }); }
@@ -144,20 +151,82 @@ app.post('/api/posts/:postId/like', async (req, res) => {
   try {
     const { data: existingLike } = await supabase.from('likes').select('id').eq('user_id', user_id).eq('post_id', postId);
     if (existingLike && existingLike.length > 0) {
-      // Unlike
       await supabase.from('likes').delete().eq('user_id', user_id).eq('post_id', postId);
       const { data: post } = await supabase.from('posts').select('likes_count').eq('id', postId);
       const newCount = Math.max(0, (post[0].likes_count || 1) - 1);
       await supabase.from('posts').update({ likes_count: newCount }).eq('id', postId);
       res.json({ success: true, liked: false, likes_count: newCount });
     } else {
-      // Like
       await supabase.from('likes').insert([{ user_id, post_id: postId }]);
       const { data: post } = await supabase.from('posts').select('likes_count').eq('id', postId);
       const newCount = (post[0].likes_count || 0) + 1;
       await supabase.from('posts').update({ likes_count: newCount }).eq('id', postId);
       res.json({ success: true, liked: true, likes_count: newCount });
     }
+  } catch (error) { res.json({ success: false, error: error.message }); }
+});
+
+// COMMENTS
+app.get('/api/posts/:postId/comments', async (req, res) => {
+  const { postId } = req.params;
+  try {
+    const { data: comments, error } = await supabase.from('comments').select('*').eq('post_id', postId).order('created_at', { ascending: true });
+    if (error) throw error;
+    const enriched = await Promise.all((comments || []).map(async (comment) => {
+      const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', comment.user_id);
+      return { ...comment, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (error) { res.json({ success: false, error: error.message }); }
+});
+
+app.post('/api/posts/:postId/comments', async (req, res) => {
+  const { postId } = req.params;
+  const { user_id, content } = req.body;
+  try {
+    const { data, error } = await supabase.from('comments').insert([{ post_id: postId, user_id, content }]).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) { res.json({ success: false, error: error.message }); }
+});
+
+app.delete('/api/comments/:commentId', async (req, res) => {
+  const { commentId } = req.params;
+  try {
+    const { error } = await supabase.from('comments').delete().eq('id', commentId);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) { res.json({ success: false, error: error.message }); }
+});
+
+// STORIES
+app.get('/api/stories', async (req, res) => {
+  try {
+    const { data: stories, error } = await supabase.from('stories').select('*').gt('expires_at', new Date().toISOString()).order('created_at', { ascending: false });
+    if (error) throw error;
+    const enriched = await Promise.all((stories || []).map(async (story) => {
+      const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', story.user_id);
+      return { ...story, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (error) { res.json({ success: false, error: error.message }); }
+});
+
+app.post('/api/stories', async (req, res) => {
+  const { user_id, image_url } = req.body;
+  try {
+    const { data, error } = await supabase.from('stories').insert([{ user_id, image_url }]).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (error) { res.json({ success: false, error: error.message }); }
+});
+
+app.delete('/api/stories/:storyId', async (req, res) => {
+  const { storyId } = req.params;
+  try {
+    const { error } = await supabase.from('stories').delete().eq('id', storyId);
+    if (error) throw error;
+    res.json({ success: true });
   } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
