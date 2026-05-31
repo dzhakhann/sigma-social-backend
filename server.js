@@ -13,7 +13,8 @@ const io = new Server(httpServer, { cors: { origin: '*' } });
 
 app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
 app.options('*', cors());
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 const SUPABASE_URL = 'https://uvbyxkrtyjqrorxnckvw.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV2Ynl4a3J0eWpxcm9yeG5ja3Z3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3OTg5MDM4NiwiZXhwIjoyMDk1NDY2Mzg2fQ.oP8PhoIqP8F6QJnKM4p-gujW_nfe12ZWsePg_Scc_8A';
@@ -122,13 +123,7 @@ app.get('/api/posts', async (req, res) => {
         const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
         isLiked = !!(like && like.length > 0);
       }
-      return {
-        ...post,
-        username: user?.[0]?.username || 'Unknown',
-        user_avatar: user?.[0]?.avatar_url || null,
-        is_liked: isLiked,
-        comments_count: comments?.length || 0,
-      };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_liked: isLiked, comments_count: comments?.length || 0 };
     }));
     res.json({ success: true, data: enrichedPosts });
   } catch (error) { res.json({ success: false, error: error.message }); }
@@ -212,13 +207,32 @@ app.get('/api/stories', async (req, res) => {
   } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
-app.post('/api/stories', async (req, res) => {
-  const { user_id, image_url } = req.body;
+app.post('/api/stories/upload', async (req, res) => {
+  const { user_id, image_base64 } = req.body;
   try {
-    const { data, error } = await supabase.from('stories').insert([{ user_id, image_url }]).select().single();
-    if (error) throw error;
+    const buffer = Buffer.from(image_base64, 'base64');
+    const fileName = `${user_id}_story_${Date.now()}.jpg`;
+
+    const { error: uploadError } = await supabase.storage
+      .from('avatars')
+      .upload(fileName, buffer, { contentType: 'image/jpeg', upsert: true });
+
+    if (uploadError) throw uploadError;
+
+    const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(fileName);
+
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    const { data, error: dbError } = await supabase
+      .from('stories')
+      .insert([{ user_id, image_url: urlData.publicUrl, expires_at: expiresAt }])
+      .select().single();
+
+    if (dbError) throw dbError;
     res.json({ success: true, data });
-  } catch (error) { res.json({ success: false, error: error.message }); }
+  } catch (error) {
+    console.error('Story upload error:', error);
+    res.json({ success: false, error: error.message });
+  }
 });
 
 app.delete('/api/stories/:storyId', async (req, res) => {
@@ -302,36 +316,6 @@ io.on('connection', (socket) => {
   socket.on('user_connect', (data) => { io.emit('user_online', data); });
   socket.on('send_message', (data) => { io.emit('receive_message', data); });
   socket.on('disconnect', () => {});
-});
-
-// STORY UPLOAD
-app.post('/api/stories/upload', async (req, res) => {
-  const { user_id, image_base64 } = req.body;
-  try {
-    const buffer = Buffer.from(image_base64, 'base64');
-    const fileName = `${user_id}_story_${Date.now()}.jpg`;
-
-    const { error } = await supabase.storage
-      .from('avatars')
-      .upload(fileName, buffer, { contentType: 'image/jpeg', upsert: true });
-
-    if (error) throw error;
-
-    const { data: urlData } = supabase.storage
-      .from('avatars')
-      .getPublicUrl(fileName);
-
-    const { data, error: dbError } = await supabase
-      .from('stories')
-      .insert([{ user_id, image_url: urlData.publicUrl }])
-      .select().single();
-
-    if (dbError) throw dbError;
-    res.json({ success: true, data });
-  } catch (error) {
-    console.error('Story upload error:', error);
-    res.json({ success: false, error: error.message });
-  }
 });
 
 const PORT = process.env.PORT || 3000;
