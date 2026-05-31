@@ -9,15 +9,9 @@ dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);
-const io = new Server(httpServer, {
-  cors: { origin: '*' },
-});
+const io = new Server(httpServer, { cors: { origin: '*' } });
 
-app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
 app.options('*', cors());
 app.use(express.json());
 
@@ -25,10 +19,9 @@ const SUPABASE_URL = 'https://uvbyxkrtyjqrorxnckvw.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV2Ynl4a3J0eWpxcm9yeG5ja3Z3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3OTg5MDM4NiwiZXhwIjoyMDk1NDY2Mzg2fQ.oP8PhoIqP8F6QJnKM4p-gujW_nfe12ZWsePg_Scc_8A';
 const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-app.get('/api/health', (req, res) => {
-  res.json({ success: true, message: 'Server is running!' });
-});
+app.get('/api/health', (req, res) => res.json({ success: true, message: 'Server is running!' }));
 
+// AUTH
 app.post('/api/auth/register', async (req, res) => {
   const { email, username, password } = req.body;
   try {
@@ -37,10 +30,7 @@ app.post('/api/auth/register', async (req, res) => {
     const { data, error } = await supabase.from('users').insert([{ email, username, password_hash: password, bio: '', followers_count: 0, following_count: 0 }]).select().single();
     if (error) throw error;
     res.json({ success: true, data: { user: data } });
-  } catch (error) {
-    console.error('Register error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.post('/api/auth/login', async (req, res) => {
@@ -50,20 +40,16 @@ app.post('/api/auth/login', async (req, res) => {
     if (error) throw error;
     if (!data || data.length === 0) return res.json({ success: false, error: 'Invalid credentials' });
     res.json({ success: true, data: { user: data[0] } });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
+// USERS
 app.get('/api/users', async (req, res) => {
   try {
     const { data, error } = await supabase.from('users').select('*');
     if (error) throw error;
     res.json({ success: true, data });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.get('/api/users/:userId', async (req, res) => {
@@ -73,9 +59,7 @@ app.get('/api/users/:userId', async (req, res) => {
     if (error) throw error;
     if (!data || data.length === 0) return res.json({ success: false, error: 'User not found' });
     res.json({ success: true, data: data[0] });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.post('/api/users/:userId/update', async (req, res) => {
@@ -87,9 +71,7 @@ app.post('/api/users/:userId/update', async (req, res) => {
     const { data, error } = await supabase.from('users').update(updateData).eq('id', userId).select();
     if (error) throw error;
     res.json({ success: true, data: data[0] });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.post('/api/users/:userId/follow/:targetUserId', async (req, res) => {
@@ -103,9 +85,7 @@ app.post('/api/users/:userId/follow/:targetUserId', async (req, res) => {
     const { data: currentUser } = await supabase.from('users').select('following_count').eq('id', userId);
     if (currentUser) await supabase.from('users').update({ following_count: (currentUser[0].following_count || 0) + 1 }).eq('id', userId);
     res.json({ success: true, message: 'Followed!' });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.post('/api/users/:userId/unfollow/:targetUserId', async (req, res) => {
@@ -117,9 +97,7 @@ app.post('/api/users/:userId/unfollow/:targetUserId', async (req, res) => {
     const { data: currentUser } = await supabase.from('users').select('following_count').eq('id', userId);
     if (currentUser) await supabase.from('users').update({ following_count: Math.max(0, (currentUser[0].following_count || 1) - 1) }).eq('id', userId);
     res.json({ success: true, message: 'Unfollowed!' });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.get('/api/users/:userId/following/:targetUserId', async (req, res) => {
@@ -127,23 +105,26 @@ app.get('/api/users/:userId/following/:targetUserId', async (req, res) => {
   try {
     const { data } = await supabase.from('follows').select('id').eq('follower_id', userId).eq('following_id', targetUserId);
     res.json({ isFollowing: !!(data && data.length > 0) });
-  } catch (error) {
-    res.json({ isFollowing: false });
-  }
+  } catch (error) { res.json({ isFollowing: false }); }
 });
 
+// POSTS
 app.get('/api/posts', async (req, res) => {
+  const { userId } = req.query;
   try {
     const { data: posts, error } = await supabase.from('posts').select('*').order('created_at', { ascending: false });
     if (error) throw error;
     const enrichedPosts = await Promise.all(posts.map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username').eq('id', post.user_id);
-      return { ...post, username: user?.[0]?.username || 'Unknown' };
+      const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', post.user_id);
+      let isLiked = false;
+      if (userId) {
+        const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
+        isLiked = !!(like && like.length > 0);
+      }
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_liked: isLiked };
     }));
     res.json({ success: true, data: enrichedPosts });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.post('/api/posts', async (req, res) => {
@@ -153,48 +134,46 @@ app.post('/api/posts', async (req, res) => {
     const { data, error } = await supabase.from('posts').insert([{ user_id, content, likes_count: 0 }]).select().single();
     if (error) throw error;
     res.json({ success: true, data });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
+// LIKES
 app.post('/api/posts/:postId/like', async (req, res) => {
   const { postId } = req.params;
+  const { user_id } = req.body;
   try {
-    const { data: post, error: fetchError } = await supabase.from('posts').select('likes_count').eq('id', postId);
-    if (fetchError) throw fetchError;
-    if (!post || post.length === 0) return res.json({ success: false, error: 'Post not found' });
-    const { data, error } = await supabase.from('posts').update({ likes_count: (post[0].likes_count || 0) + 1 }).eq('id', postId).select().single();
-    if (error) throw error;
-    res.json({ success: true, data });
-  } catch (error) {
-    res.json({ success: false, error: error.message });
-  }
+    const { data: existingLike } = await supabase.from('likes').select('id').eq('user_id', user_id).eq('post_id', postId);
+    if (existingLike && existingLike.length > 0) {
+      // Unlike
+      await supabase.from('likes').delete().eq('user_id', user_id).eq('post_id', postId);
+      const { data: post } = await supabase.from('posts').select('likes_count').eq('id', postId);
+      const newCount = Math.max(0, (post[0].likes_count || 1) - 1);
+      await supabase.from('posts').update({ likes_count: newCount }).eq('id', postId);
+      res.json({ success: true, liked: false, likes_count: newCount });
+    } else {
+      // Like
+      await supabase.from('likes').insert([{ user_id, post_id: postId }]);
+      const { data: post } = await supabase.from('posts').select('likes_count').eq('id', postId);
+      const newCount = (post[0].likes_count || 0) + 1;
+      await supabase.from('posts').update({ likes_count: newCount }).eq('id', postId);
+      res.json({ success: true, liked: true, likes_count: newCount });
+    }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
-// ===== CHATS ENDPOINTS =====
+// CHATS
 app.get('/api/chats', async (req, res) => {
   const { userId } = req.query;
   try {
     const { data: chats, error } = await supabase.from('chats').select('*').or(`user1_id.eq.${userId},user2_id.eq.${userId}`);
     if (error) throw error;
-
     const enrichedChats = await Promise.all((chats || []).map(async (chat) => {
       const otherUserId = chat.user1_id === userId ? chat.user2_id : chat.user1_id;
       const { data: otherUser } = await supabase.from('users').select('username, avatar_url').eq('id', otherUserId);
-      return {
-        ...chat,
-        name: otherUser?.[0]?.username || 'User',
-        avatar: otherUser?.[0]?.avatar_url || null,
-        other_user_id: otherUserId,
-      };
+      return { ...chat, name: otherUser?.[0]?.username || 'User', avatar: otherUser?.[0]?.avatar_url || null, other_user_id: otherUserId };
     }));
-
     res.json({ success: true, data: enrichedChats });
-  } catch (error) {
-    console.error('Get chats error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.post('/api/chats/get-or-create', async (req, res) => {
@@ -206,22 +185,17 @@ app.post('/api/chats/get-or-create', async (req, res) => {
     const { data: newChat, error } = await supabase.from('chats').insert([{ user1_id, user2_id }]).select().single();
     if (error) throw error;
     res.json({ success: true, data: newChat });
-  } catch (error) {
-    console.error('Create chat error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
+// MESSAGES
 app.get('/api/messages/:chatId', async (req, res) => {
   const { chatId } = req.params;
   try {
     const { data, error } = await supabase.from('messages').select('*').eq('chat_id', chatId).order('created_at', { ascending: true });
     if (error) throw error;
     res.json({ success: true, data: data || [] });
-  } catch (error) {
-    console.error('Get messages error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
 app.post('/api/messages', async (req, res) => {
@@ -232,38 +206,18 @@ app.post('/api/messages', async (req, res) => {
     await supabase.from('chats').update({ last_message: content }).eq('id', chat_id);
     io.emit('receive_message', data);
     res.json({ success: true, data });
-  } catch (error) {
-    console.error('Send message error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
-io.on('connection', (socket) => {
-  console.log('✅ User connected:', socket.id);
-  socket.on('user_connect', (data) => { io.emit('user_online', data); });
-  socket.on('send_message', (data) => { io.emit('receive_message', data); });
-  socket.on('disconnect', () => { console.log('🔴 Disconnected:', socket.id); });
-});
-
-const PORT = process.env.PORT || 3000;
-httpServer.listen(PORT, () => {
-  console.log(`✅ ΣIGMA SOCIAL SERVER running on port ${PORT}`);
-});
-
-// ===== DELETE MESSAGE =====
 app.delete('/api/messages/:messageId', async (req, res) => {
   const { messageId } = req.params;
   try {
     const { error } = await supabase.from('messages').delete().eq('id', messageId);
     if (error) throw error;
     res.json({ success: true });
-  } catch (error) {
-    console.error('Delete message error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
 
-// ===== EDIT MESSAGE =====
 app.put('/api/messages/:messageId', async (req, res) => {
   const { messageId } = req.params;
   const { content } = req.body;
@@ -271,8 +225,15 @@ app.put('/api/messages/:messageId', async (req, res) => {
     const { data, error } = await supabase.from('messages').update({ content, is_edited: true }).eq('id', messageId).select().single();
     if (error) throw error;
     res.json({ success: true, data });
-  } catch (error) {
-    console.error('Edit message error:', error);
-    res.json({ success: false, error: error.message });
-  }
+  } catch (error) { res.json({ success: false, error: error.message }); }
 });
+
+// WEBSOCKET
+io.on('connection', (socket) => {
+  socket.on('user_connect', (data) => { io.emit('user_online', data); });
+  socket.on('send_message', (data) => { io.emit('receive_message', data); });
+  socket.on('disconnect', () => {});
+});
+
+const PORT = process.env.PORT || 3000;
+httpServer.listen(PORT, () => { console.log(`✅ ΣIGMA SOCIAL SERVER running on port ${PORT}`); });
