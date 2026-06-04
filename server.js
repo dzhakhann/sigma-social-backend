@@ -170,6 +170,26 @@ app.get('/api/search/users', async (req, res) => {
 
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
+// Following feed
+app.get('/api/posts/following', async (req, res) => {
+  const { userId } = req.query;
+  if (!userId) return res.json({ success: true, data: [] });
+  try {
+    const { data: follows } = await supabase.from('follows').select('following_id').eq('follower_id', userId);
+    const ids = (follows || []).map(f => f.following_id);
+    if (ids.length === 0) return res.json({ success: true, data: [] });
+    const { data: posts, error } = await supabase.from('posts').select('*').in('user_id', ids).order('created_at', { ascending: false });
+    if (error) throw error;
+    const enriched = await Promise.all(posts.map(async (post) => {
+      const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', post.user_id);
+      const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
+      const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_liked: !!(like && like.length > 0), comments_count: comments?.length || 0 };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 app.get('/api/posts', async (req, res) => {
   const { userId } = req.query;
   try {
@@ -190,10 +210,10 @@ app.get('/api/posts', async (req, res) => {
 });
 
 app.post('/api/posts', async (req, res) => {
-  const { user_id, content } = req.body;
-  if (!content || !user_id) return res.json({ success: false, error: 'Missing fields' });
+  const { user_id, content, image_url } = req.body;
+  if (!user_id) return res.json({ success: false, error: 'Missing fields' });
   try {
-    const { data, error } = await supabase.from('posts').insert([{ user_id, content, likes_count: 0 }]).select().single();
+    const { data, error } = await supabase.from('posts').insert([{ user_id, content: content || '', image_url: image_url || null, likes_count: 0 }]).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -419,9 +439,13 @@ app.get('/api/messages/:chatId', async (req, res) => {
 });
 
 app.post('/api/messages', async (req, res) => {
-  const { chat_id, sender_id, content } = req.body;
+  const { chat_id, sender_id, content, message_type, media_url } = req.body;
   try {
-    const { data, error } = await supabase.from('messages').insert([{ chat_id, sender_id, content }]).select().single();
+    const { data, error } = await supabase.from('messages').insert([{
+      chat_id, sender_id, content: content || '',
+      message_type: message_type || 'text',
+      media_url: media_url || null
+    }]).select().single();
     if (error) throw error;
     await supabase.from('chats').update({ last_message: content }).eq('id', chat_id);
     io.emit('receive_message', data);
