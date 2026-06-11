@@ -47,8 +47,15 @@ app.options('*', cors());
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
-const SUPABASE_URL = 'https://uvbyxkrtyjqrorxnckvw.supabase.co';
-const SUPABASE_KEY = process.env.SUPABASE_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InV2Ynl4a3J0eWpxcm9yeG5ja3Z3Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3OTg5MDM4NiwiZXhwIjoyMDk1NDY2Mzg2fQ.oP8PhoIqP8F6QJnKM4p-gujW_nfe12ZWsePg_Scc_8A';
+// The service_role key is a full-admin secret. It must NEVER be hardcoded or
+// shipped to the client — it lives only in an environment variable on the
+// server (.env locally, Render dashboard in production).
+const SUPABASE_URL = process.env.SUPABASE_URL || 'https://uvbyxkrtyjqrorxnckvw.supabase.co';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || process.env.SUPABASE_SERVICE_ROLE;
+if (!SUPABASE_KEY) {
+  console.error('❌ FATAL: SUPABASE_KEY env var is not set. Refusing to start.');
+  process.exit(1);
+}
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
 // ─── HELPER ───────────────────────────────────────────────────────────────────
