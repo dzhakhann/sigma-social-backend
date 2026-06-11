@@ -1,9 +1,13 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import crypto from 'crypto';
+import bcrypt from 'bcrypt';
+import rateLimit from 'express-rate-limit';
 import { createClient } from '@supabase/supabase-js';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
+import { RECOVERY_WORDS } from './wordlist.js';
 
 dotenv.config();
 
@@ -36,14 +40,31 @@ dotenv.config();
     reel_id uuid references reels(id) on delete cascade,
     unique(user_id, reel_id)
   );
+
+  -- Recovery phrase support (run once): stores only the sha256 hash of the
+  -- 12-word phrase, never the plaintext.
+  alter table users add column if not exists recovery_hash text;
+  -- email is no longer required for new accounts:
+  alter table users alter column email drop not null;
 */
 
 const app = express();
+// Render (and most hosts) sit behind a proxy; needed so rate-limit reads the
+// real client IP from X-Forwarded-For instead of bucketing everyone together.
+app.set('trust proxy', 1);
 const httpServer = createServer(app);
 const io = new Server(httpServer, { cors: { origin: '*' } });
 
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
-app.options('*', cors());
+// CORS origins come from env (comma-separated). Defaults to '*' so nothing
+// breaks out of the box; set CORS_ORIGIN in production to lock it down.
+const corsOrigins = (process.env.CORS_ORIGIN || '*').split(',').map((s) => s.trim()).filter(Boolean);
+const corsOptions = {
+  origin: corsOrigins.includes('*') ? '*' : corsOrigins,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ limit: '100mb', extended: true }));
 
@@ -58,6 +79,27 @@ if (!SUPABASE_KEY) {
 }
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ─── RATE LIMITING ──────────────────────────────────────────────────────────
+// Protects against brute-forcing passwords / recovery phrases and upload abuse.
+const WINDOW = parseInt(process.env.RATE_LIMIT_WINDOW || '900000', 10); // 15 min
+const limiterBase = { windowMs: WINDOW, standardHeaders: true, legacyHeaders: false };
+const authLimiter = rateLimit({
+  ...limiterBase, max: 40,
+  message: { success: false, error: 'Too many attempts. Try again later.' },
+});
+const recoverLimiter = rateLimit({
+  ...limiterBase, max: 10,
+  message: { success: false, error: 'Too many recovery attempts. Try again later.' },
+});
+const uploadLimiter = rateLimit({
+  ...limiterBase, max: 100,
+  message: { success: false, error: 'Upload limit reached. Try again later.' },
+});
+// Order matters: the stricter /recover limiter is mounted before the general one.
+app.use('/api/auth/recover', recoverLimiter);
+app.use('/api/auth', authLimiter);
+app.use('/api/upload', uploadLimiter);
+
 // ─── HELPER ───────────────────────────────────────────────────────────────────
 
 async function createNotification(userId, fromUserId, type, message, postId = null) {
@@ -70,32 +112,197 @@ async function createNotification(userId, fromUserId, type, message, postId = nu
   } catch (_) {}
 }
 
+// ─── RECOVERY PHRASE HELPERS ────────────────────────────────────────────────
+// Generate an N-word recovery phrase using a cryptographically-secure RNG.
+function generateRecoveryPhrase(wordCount = 12) {
+  const words = [];
+  for (let i = 0; i < wordCount; i++) {
+    words.push(RECOVERY_WORDS[crypto.randomInt(0, RECOVERY_WORDS.length)]);
+  }
+  return words.join(' ');
+}
+
+// Hash a phrase before storing it. We never keep the plaintext phrase.
+// Normalize (lowercase, collapse whitespace) so input formatting doesn't matter.
+function hashPhrase(phrase) {
+  const normalized = String(phrase).trim().toLowerCase().replace(/\s+/g, ' ');
+  return crypto.createHash('sha256').update(normalized).digest('hex');
+}
+
+// ─── PASSWORD HELPERS ───────────────────────────────────────────────────────
+const BCRYPT_ROUNDS = 10;
+// bcrypt hashes start with $2a/$2b/$2y — used to detect legacy plaintext rows.
+const looksHashed = (s) => typeof s === 'string' && s.startsWith('$2');
+
+// ─── JWT (HS256, no external dependency) ─────────────────────────────────────
+const JWT_SECRET = process.env.JWT_SECRET || 'dev-insecure-secret-change-me';
+const JWT_TTL = parseInt(process.env.JWT_TTL_SECONDS || '2592000', 10); // 30 days
+if (JWT_SECRET === 'dev-insecure-secret-change-me' ||
+    JWT_SECRET === 'your-super-secret-jwt-key-change-this-in-production') {
+  console.warn('⚠️  JWT_SECRET is weak/default. Set a strong JWT_SECRET in env for production.');
+}
+
+const b64url = (input) => Buffer.from(input).toString('base64url');
+
+function signToken(payload, ttl = JWT_TTL) {
+  const now = Math.floor(Date.now() / 1000);
+  const body = { ...payload, iat: now, exp: now + ttl };
+  const head = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+  const data = `${head}.${b64url(JSON.stringify(body))}`;
+  const sig = crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
+  return `${data}.${sig}`;
+}
+
+function verifyToken(token) {
+  try {
+    const parts = String(token).split('.');
+    if (parts.length !== 3) return null;
+    const data = `${parts[0]}.${parts[1]}`;
+    const expected = crypto.createHmac('sha256', JWT_SECRET).update(data).digest('base64url');
+    const a = Buffer.from(parts[2]);
+    const b = Buffer.from(expected);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+    if (payload.exp && Math.floor(Date.now() / 1000) > payload.exp) return null;
+    return payload;
+  } catch (_) {
+    return null;
+  }
+}
+
+// Require a valid Bearer token; exposes the authenticated user id as req.userId.
+function authRequired(req, res, next) {
+  const hdr = req.headers.authorization || '';
+  const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+  const payload = token ? verifyToken(token) : null;
+  if (!payload || !payload.sub) {
+    return res.status(401).json({ success: false, error: 'Not authenticated' });
+  }
+  req.userId = payload.sub;
+  next();
+}
+
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => res.json({ success: true, message: 'Server is running!' }));
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
+// ─── Register: username + password only. No email, no phone.
 app.post('/api/auth/register', async (req, res) => {
-  const { email, username, password } = req.body;
+  const { username, password } = req.body;
+  if (!username || !password) return res.json({ success: false, error: 'Username and password are required' });
+  if (username.length < 3) return res.json({ success: false, error: 'Username must be at least 3 characters' });
+  if (password.length < 6) return res.json({ success: false, error: 'Password must be at least 6 characters' });
+  // Only allow letters, numbers, underscores, dots
+  if (!/^[a-zA-Z0-9_.]+$/.test(username)) return res.json({ success: false, error: 'Username can only contain letters, numbers, _ and .' });
   try {
-    const { data: existing } = await supabase.from('users').select('id').eq('email', email);
-    if (existing && existing.length > 0) return res.json({ success: false, error: 'User already exists' });
+    const { data: existing } = await supabase.from('users').select('id').eq('username', username);
+    if (existing && existing.length > 0) return res.json({ success: false, error: 'Username already taken' });
+    // Generate a one-time recovery phrase. We store only its hash; the plaintext
+    // is returned to the client exactly once and never persisted server-side.
+    const recoveryPhrase = generateRecoveryPhrase(12);
+    const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
     const { data, error } = await supabase.from('users').insert([{
-      email, username, password_hash: password, bio: '', followers_count: 0, following_count: 0
+      username,
+      password_hash,
+      // email column kept nullable — generate a placeholder so old DB constraints don't break
+      email: `${username}@sigma.local`,
+      bio: '',
+      followers_count: 0,
+      following_count: 0,
+      recovery_hash: hashPhrase(recoveryPhrase),
     }]).select().single();
     if (error) throw error;
-    res.json({ success: true, data: { user: data } });
+    // recovery_phrase is shown to the user ONCE on this response.
+    const token = signToken({ sub: data.id, username: data.username });
+    res.json({ success: true, data: { user: data, recovery_phrase: recoveryPhrase, token } });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── Login: username + password only.
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
+  const { username, password } = req.body;
+  if (!username || !password) return res.json({ success: false, error: 'Username and password are required' });
   try {
-    const { data, error } = await supabase.from('users').select('*').eq('email', email).eq('password_hash', password);
+    const { data, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('username', username);
     if (error) throw error;
-    if (!data || data.length === 0) return res.json({ success: false, error: 'Invalid credentials' });
-    res.json({ success: true, data: { user: data[0] } });
+    if (!data || data.length === 0) return res.json({ success: false, error: 'Wrong username or password' });
+    const user = data[0];
+    const stored = user.password_hash || '';
+    let ok = false;
+    if (looksHashed(stored)) {
+      ok = await bcrypt.compare(password, stored);
+    } else {
+      // Legacy plaintext row: compare directly, then transparently upgrade to bcrypt.
+      ok = stored === password;
+      if (ok) {
+        const upgraded = await bcrypt.hash(password, BCRYPT_ROUNDS);
+        await supabase.from('users').update({ password_hash: upgraded }).eq('id', user.id);
+      }
+    }
+    if (!ok) return res.json({ success: false, error: 'Wrong username or password' });
+    const token = signToken({ sub: user.id, username: user.username });
+    res.json({ success: true, data: { user, token } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── Recover: reset password using username + recovery phrase. No email needed.
+app.post('/api/auth/recover', async (req, res) => {
+  const { username, phrase, new_password } = req.body;
+  if (!username || !phrase || !new_password) {
+    return res.json({ success: false, error: 'Username, recovery phrase and new password are required' });
+  }
+  if (new_password.length < 6) {
+    return res.json({ success: false, error: 'Password must be at least 6 characters' });
+  }
+  try {
+    const { data: users, error } = await supabase
+      .from('users').select('*').eq('username', username);
+    if (error) throw error;
+    if (!users || users.length === 0) {
+      return res.json({ success: false, error: 'Wrong username or recovery phrase' });
+    }
+    const user = users[0];
+    if (!user.recovery_hash || user.recovery_hash !== hashPhrase(phrase)) {
+      return res.json({ success: false, error: 'Wrong username or recovery phrase' });
+    }
+    const new_hash = await bcrypt.hash(new_password, BCRYPT_ROUNDS);
+    const { data: updated, error: upErr } = await supabase
+      .from('users').update({ password_hash: new_hash }).eq('id', user.id).select().single();
+    if (upErr) throw upErr;
+    const token = signToken({ sub: updated.id, username: updated.username });
+    res.json({ success: true, data: { user: updated, token } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── MEDIA UPLOAD ───────────────────────────────────────────────────────────
+// Generic upload: the client sends base64 bytes, the SERVER (which holds the
+// Supabase key) writes to storage and returns a public URL. The client never
+// sees the key.
+app.post('/api/upload', authRequired, async (req, res) => {
+  const { file_base64, folder, ext, content_type } = req.body;
+  const user_id = req.userId;
+  if (!file_base64) return res.json({ success: false, error: 'No file provided' });
+  try {
+    const buffer = Buffer.from(file_base64, 'base64');
+    const MAX_UPLOAD = parseInt(process.env.UPLOAD_MAX_BYTES || '31457280', 10); // 30 MB
+    if (buffer.length > MAX_UPLOAD) {
+      return res.json({ success: false, error: 'File too large (max 30 MB)' });
+    }
+    const safeFolder = (String(folder || 'upload').replace(/[^a-z0-9_-]/gi, '').slice(0, 24)) || 'upload';
+    const safeExt = (String(ext || 'jpg').replace(/[^a-z0-9]/gi, '').slice(0, 5)) || 'jpg';
+    const fileName = `${safeFolder}_${user_id || 'anon'}_${Date.now()}.${safeExt}`;
+    const { error } = await supabase.storage.from('avatars').upload(fileName, buffer, {
+      contentType: content_type || 'image/jpeg',
+      upsert: true,
+    });
+    if (error) throw error;
+    const { data } = supabase.storage.from('avatars').getPublicUrl(fileName);
+    res.json({ success: true, url: data.publicUrl });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -118,7 +325,8 @@ app.get('/api/users/:userId', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/users/:userId/update', async (req, res) => {
+app.post('/api/users/:userId/update', authRequired, async (req, res) => {
+  if (req.params.userId !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
   const { username, bio, avatar_url } = req.body;
   try {
     const update = { username, bio };
@@ -129,8 +337,9 @@ app.post('/api/users/:userId/update', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/users/:userId/follow/:targetUserId', async (req, res) => {
-  const { userId, targetUserId } = req.params;
+app.post('/api/users/:userId/follow/:targetUserId', authRequired, async (req, res) => {
+  const userId = req.userId;
+  const { targetUserId } = req.params;
   try {
     const { data: ex } = await supabase.from('follows').select('id').eq('follower_id', userId).eq('following_id', targetUserId);
     if (ex && ex.length > 0) return res.json({ success: false, error: 'Already following' });
@@ -144,8 +353,9 @@ app.post('/api/users/:userId/follow/:targetUserId', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/users/:userId/unfollow/:targetUserId', async (req, res) => {
-  const { userId, targetUserId } = req.params;
+app.post('/api/users/:userId/unfollow/:targetUserId', authRequired, async (req, res) => {
+  const userId = req.userId;
+  const { targetUserId } = req.params;
   try {
     await supabase.from('follows').delete().eq('follower_id', userId).eq('following_id', targetUserId);
     const { data: target } = await supabase.from('users').select('followers_count').eq('id', targetUserId);
@@ -216,9 +426,9 @@ app.get('/api/posts', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/posts', async (req, res) => {
-  const { user_id, content, image_url } = req.body;
-  if (!user_id) return res.json({ success: false, error: 'Missing fields' });
+app.post('/api/posts', authRequired, async (req, res) => {
+  const user_id = req.userId;
+  const { content, image_url } = req.body;
   try {
     const { data, error } = await supabase.from('posts').insert([{ user_id, content: content || '', image_url: image_url || null, likes_count: 0 }]).select().single();
     if (error) throw error;
@@ -228,9 +438,9 @@ app.post('/api/posts', async (req, res) => {
 
 // ─── LIKES ────────────────────────────────────────────────────────────────────
 
-app.post('/api/posts/:postId/like', async (req, res) => {
+app.post('/api/posts/:postId/like', authRequired, async (req, res) => {
   const { postId } = req.params;
-  const { user_id } = req.body;
+  const user_id = req.userId;
   try {
     const { data: existing } = await supabase.from('likes').select('id').eq('user_id', user_id).eq('post_id', postId);
     const { data: post } = await supabase.from('posts').select('likes_count, user_id').eq('id', postId);
@@ -264,9 +474,10 @@ app.get('/api/posts/:postId/comments', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/posts/:postId/comments', async (req, res) => {
+app.post('/api/posts/:postId/comments', authRequired, async (req, res) => {
   const { postId } = req.params;
-  const { user_id, content } = req.body;
+  const user_id = req.userId;
+  const { content } = req.body;
   try {
     const { data, error } = await supabase.from('comments').insert([{ post_id: postId, user_id, content }]).select().single();
     if (error) throw error;
@@ -279,8 +490,11 @@ app.post('/api/posts/:postId/comments', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.delete('/api/comments/:commentId', async (req, res) => {
+app.delete('/api/comments/:commentId', authRequired, async (req, res) => {
   try {
+    const { data: existing } = await supabase.from('comments').select('user_id').eq('id', req.params.commentId);
+    if (!existing || existing.length === 0) return res.json({ success: false, error: 'Not found' });
+    if (existing[0].user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
     const { error } = await supabase.from('comments').delete().eq('id', req.params.commentId);
     if (error) throw error;
     res.json({ success: true });
@@ -301,8 +515,9 @@ app.get('/api/stories', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/stories/upload', async (req, res) => {
-  const { user_id, image_base64 } = req.body;
+app.post('/api/stories/upload', authRequired, async (req, res) => {
+  const { image_base64 } = req.body;
+  const user_id = req.userId;
   try {
     const buffer = Buffer.from(image_base64, 'base64');
     const fileName = `${user_id}_story_${Date.now()}.jpg`;
@@ -316,8 +531,11 @@ app.post('/api/stories/upload', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.delete('/api/stories/:storyId', async (req, res) => {
+app.delete('/api/stories/:storyId', authRequired, async (req, res) => {
   try {
+    const { data: s } = await supabase.from('stories').select('user_id').eq('id', req.params.storyId);
+    if (!s || s.length === 0) return res.json({ success: false, error: 'Not found' });
+    if (s[0].user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
     const { error } = await supabase.from('stories').delete().eq('id', req.params.storyId);
     if (error) throw error;
     res.json({ success: true });
@@ -340,18 +558,17 @@ app.get('/api/notifications', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/notifications/:notifId/read', async (req, res) => {
+app.post('/api/notifications/:notifId/read', authRequired, async (req, res) => {
   try {
-    const { error } = await supabase.from('notifications').update({ is_read: true }).eq('id', req.params.notifId);
+    const { error } = await supabase.from('notifications').update({ is_read: true }).eq('id', req.params.notifId).eq('user_id', req.userId);
     if (error) throw error;
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/notifications/read-all', async (req, res) => {
-  const { user_id } = req.body;
+app.post('/api/notifications/read-all', authRequired, async (req, res) => {
   try {
-    const { error } = await supabase.from('notifications').update({ is_read: true }).eq('user_id', user_id);
+    const { error } = await supabase.from('notifications').update({ is_read: true }).eq('user_id', req.userId);
     if (error) throw error;
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -377,9 +594,10 @@ app.get('/api/reels', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/reels', async (req, res) => {
-  const { user_id, video_url, caption } = req.body;
-  if (!user_id || !video_url) return res.json({ success: false, error: 'Missing fields' });
+app.post('/api/reels', authRequired, async (req, res) => {
+  const user_id = req.userId;
+  const { video_url, caption } = req.body;
+  if (!video_url) return res.json({ success: false, error: 'Missing fields' });
   try {
     const { data, error } = await supabase.from('reels').insert([{ user_id, video_url, caption: caption || '', likes_count: 0 }]).select().single();
     if (error) throw error;
@@ -387,9 +605,9 @@ app.post('/api/reels', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/reels/:reelId/like', async (req, res) => {
+app.post('/api/reels/:reelId/like', authRequired, async (req, res) => {
   const { reelId } = req.params;
-  const { user_id } = req.body;
+  const user_id = req.userId;
   try {
     const { data: existing } = await supabase.from('reel_likes').select('id').eq('user_id', user_id).eq('reel_id', reelId);
     const { data: reel } = await supabase.from('reels').select('likes_count').eq('id', reelId);
@@ -423,9 +641,10 @@ app.get('/api/chats', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/chats/get-or-create', async (req, res) => {
-  const { user1_id, user2_id } = req.body;
-  if (!user1_id || !user2_id) return res.json({ success: false, error: 'Missing user ids' });
+app.post('/api/chats/get-or-create', authRequired, async (req, res) => {
+  const user1_id = req.userId;
+  const { user2_id } = req.body;
+  if (!user2_id) return res.json({ success: false, error: 'Missing user ids' });
   try {
     const { data: existing } = await supabase.from('chats').select('*').or(`and(user1_id.eq.${user1_id},user2_id.eq.${user2_id}),and(user1_id.eq.${user2_id},user2_id.eq.${user1_id})`);
     if (existing && existing.length > 0) return res.json({ success: true, data: existing[0] });
@@ -445,9 +664,16 @@ app.get('/api/messages/:chatId', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.post('/api/messages', async (req, res) => {
-  const { chat_id, sender_id, content, message_type, media_url } = req.body;
+app.post('/api/messages', authRequired, async (req, res) => {
+  const { chat_id, content, message_type, media_url } = req.body;
+  const sender_id = req.userId;
   try {
+    // The sender must be a participant of the chat.
+    const { data: chat } = await supabase.from('chats').select('user1_id, user2_id').eq('id', chat_id);
+    if (!chat || chat.length === 0) return res.json({ success: false, error: 'Chat not found' });
+    if (chat[0].user1_id !== sender_id && chat[0].user2_id !== sender_id) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
     const { data, error } = await supabase.from('messages').insert([{
       chat_id, sender_id, content: content || '',
       message_type: message_type || 'text',
@@ -460,17 +686,23 @@ app.post('/api/messages', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.delete('/api/messages/:messageId', async (req, res) => {
+app.delete('/api/messages/:messageId', authRequired, async (req, res) => {
   try {
+    const { data: m } = await supabase.from('messages').select('sender_id').eq('id', req.params.messageId);
+    if (!m || m.length === 0) return res.json({ success: false, error: 'Not found' });
+    if (m[0].sender_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
     const { error } = await supabase.from('messages').delete().eq('id', req.params.messageId);
     if (error) throw error;
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-app.put('/api/messages/:messageId', async (req, res) => {
+app.put('/api/messages/:messageId', authRequired, async (req, res) => {
   const { content } = req.body;
   try {
+    const { data: m } = await supabase.from('messages').select('sender_id').eq('id', req.params.messageId);
+    if (!m || m.length === 0) return res.json({ success: false, error: 'Not found' });
+    if (m[0].sender_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
     const { data, error } = await supabase.from('messages').update({ content, is_edited: true }).eq('id', req.params.messageId).select().single();
     if (error) throw error;
     res.json({ success: true, data });
