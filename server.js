@@ -46,6 +46,13 @@ dotenv.config();
   alter table users add column if not exists recovery_hash text;
   -- email is no longer required for new accounts:
   alter table users alter column email drop not null;
+
+  -- LinkedIn-style profile fields:
+  alter table users add column if not exists headline text;
+  alter table users add column if not exists about text;
+  alter table users add column if not exists location text;
+  alter table users add column if not exists work text;
+  alter table users add column if not exists website text;
 */
 
 const app = express();
@@ -327,10 +334,18 @@ app.get('/api/users/:userId', async (req, res) => {
 
 app.post('/api/users/:userId/update', authRequired, async (req, res) => {
   if (req.params.userId !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
-  const { username, bio, avatar_url } = req.body;
+  const { username, bio, avatar_url, headline, about, location, work, website } = req.body;
   try {
-    const update = { username, bio };
+    // Only update fields that were actually sent (partial updates supported).
+    const update = {};
+    if (username !== undefined) update.username = username;
+    if (bio !== undefined) update.bio = bio;
     if (avatar_url) update.avatar_url = avatar_url;
+    if (headline !== undefined) update.headline = headline;
+    if (about !== undefined) update.about = about;
+    if (location !== undefined) update.location = location;
+    if (work !== undefined) update.work = work;
+    if (website !== undefined) update.website = website;
     const { data, error } = await supabase.from('users').update(update).eq('id', req.params.userId).select();
     if (error) throw error;
     res.json({ success: true, data: data[0] });
