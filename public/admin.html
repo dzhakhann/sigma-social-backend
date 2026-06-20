@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sigma Social — Admin</title>
+<style>
+  :root{
+    --bg:#0F1015; --surface:#171923; --surface2:#1F2230;
+    --ink:#E9EBF1; --soft:#878DA0; --accent:#4F7CFF; --danger:#E5556B;
+    --line:rgba(255,255,255,.08);
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+  a{color:var(--accent)}
+  .wrap{max-width:1000px;margin:0 auto;padding:20px}
+  .row{display:flex;align-items:center;gap:10px}
+  .badge{display:inline-flex;width:34px;height:34px;border-radius:9px;
+    align-items:center;justify-content:center;font-weight:800;color:#fff;
+    background:linear-gradient(135deg,#6E92FF,#2D5BFF)}
+  h1{font-size:18px;margin:0}
+  .muted{color:var(--soft)}
+  .btn{background:var(--accent);color:#fff;border:0;border-radius:10px;
+    padding:11px 16px;font-weight:700;cursor:pointer;font-size:14px}
+  .btn.ghost{background:var(--surface2);color:var(--ink)}
+  .btn.sm{padding:7px 10px;font-size:13px;border-radius:8px}
+  .btn.danger{background:transparent;color:var(--danger);
+    border:1px solid rgba(229,85,107,.4)}
+  input{width:100%;background:var(--surface2);border:1px solid var(--line);
+    color:var(--ink);border-radius:10px;padding:12px 14px;font-size:15px;outline:none}
+  input:focus{border-color:var(--accent)}
+  .card{background:var(--surface);border:1px solid var(--line);
+    border-radius:16px;padding:18px}
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+    gap:10px;margin:18px 0}
+  .stat{background:var(--surface);border-radius:12px;padding:14px;text-align:center}
+  .stat b{font-size:22px;display:block}
+  .stat span{color:var(--soft);font-size:12px}
+  .tabs{display:flex;gap:8px;margin:12px 0}
+  .tab{background:var(--surface2);color:var(--soft);border:0;border-radius:10px;
+    padding:9px 16px;cursor:pointer;font-weight:600}
+  .tab.active{background:var(--accent);color:#fff}
+  .item{display:flex;align-items:center;gap:10px;background:var(--surface);
+    border-radius:12px;padding:12px 14px;margin-bottom:8px}
+  .item .grow{flex:1;min-width:0}
+  .item .name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .item .sub{color:var(--soft);font-size:12px;overflow:hidden;
+    text-overflow:ellipsis;white-space:nowrap}
+  .pill{font-size:10px;color:var(--accent);background:rgba(79,124,255,.18);
+    padding:2px 7px;border-radius:6px;margin-left:6px}
+  .hidden{display:none}
+  .err{color:var(--danger);font-size:13px;min-height:18px;margin-top:8px}
+  .center{min-height:80vh;display:flex;align-items:center;justify-content:center}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login" class="center">
+  <div class="card" style="width:340px">
+    <div class="row" style="margin-bottom:16px">
+      <div class="badge">Σ</div>
+      <div><h1>Sigma Admin</h1><div class="muted" style="font-size:12px">Admins only</div></div>
+    </div>
+    <input id="u" placeholder="Username" autocomplete="username"/>
+    <div style="height:10px"></div>
+    <input id="p" type="password" placeholder="Password" autocomplete="current-password"/>
+    <div class="err" id="loginErr"></div>
+    <button class="btn" style="width:100%;margin-top:6px" onclick="login()">Sign in</button>
+  </div>
+</div>
+
+<!-- DASHBOARD -->
+<div id="dash" class="wrap hidden">
+  <div class="row" style="justify-content:space-between">
+    <div class="row"><div class="badge">Σ</div><h1>Sigma Admin</h1></div>
+    <div class="row">
+      <button class="btn ghost sm" onclick="loadAll()">Refresh</button>
+      <button class="btn ghost sm" onclick="logout()">Logout</button>
+    </div>
+  </div>
+
+  <div class="stats" id="stats"></div>
+
+  <div class="tabs">
+    <button class="tab active" id="tabUsers" onclick="showTab('users')">Users</button>
+    <button class="tab" id="tabPosts" onclick="showTab('posts')">Posts</button>
+  </div>
+
+  <div id="usersList"></div>
+  <div id="postsList" class="hidden"></div>
+</div>
+
+<script>
+const API = '/api';
+let token = localStorage.getItem('admin_token') || '';
+
+function authHeaders(){ return token ? { 'Authorization': 'Bearer ' + token } : {}; }
+
+async function login(){
+  const u = document.getElementById('u').value.trim();
+  const p = document.getElementById('p').value;
+  const err = document.getElementById('loginErr');
+  err.textContent = '';
+  try{
+    const r = await fetch(API + '/auth/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ username:u, password:p })
+    });
+    const j = await r.json();
+    if(j.success !== true){ err.textContent = j.error || 'Login failed'; return; }
+    if(j.data.user.is_admin !== true){ err.textContent = 'This account is not an admin.'; return; }
+    token = j.data.token;
+    localStorage.setItem('admin_token', token);
+    enterDash();
+  }catch(e){ err.textContent = 'Connection error'; }
+}
+
+function logout(){
+  token=''; localStorage.removeItem('admin_token');
+  document.getElementById('dash').classList.add('hidden');
+  document.getElementById('login').classList.remove('hidden');
+}
+
+function enterDash(){
+  document.getElementById('login').classList.add('hidden');
+  document.getElementById('dash').classList.remove('hidden');
+  loadAll();
+}
+
+function showTab(t){
+  document.getElementById('tabUsers').classList.toggle('active', t==='users');
+  document.getElementById('tabPosts').classList.toggle('active', t==='posts');
+  document.getElementById('usersList').classList.toggle('hidden', t!=='users');
+  document.getElementById('postsList').classList.toggle('hidden', t!=='posts');
+}
+
+async function api(path, opts={}){
+  const r = await fetch(API + path, { ...opts, headers:{...authHeaders(), ...(opts.headers||{})} });
+  if(r.status===401 || r.status===403){ logout(); throw new Error('Not authorized'); }
+  return r.json();
+}
+
+async function loadAll(){
+  try{
+    const [s,u,p] = await Promise.all([
+      api('/admin/stats'), api('/admin/users'), api('/admin/posts')
+    ]);
+    renderStats(s.data||{});
+    renderUsers(u.data||[]);
+    renderPosts(p.data||[]);
+  }catch(e){}
+}
+
+function renderStats(d){
+  const map = [['Users','users'],['Posts','posts'],['Comments','comments'],
+               ['Messages','messages'],['Stories','stories'],['Reels','reels']];
+  document.getElementById('stats').innerHTML = map.map(m =>
+    `<div class="stat"><b>${d[m[1]]??0}</b><span>${m[0]}</span></div>`).join('');
+}
+
+function esc(s){ return (s||'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+function renderUsers(list){
+  document.getElementById('usersList').innerHTML = list.map(u => `
+    <div class="item">
+      <div class="grow">
+        <div class="name">@${esc(u.username)} ${u.is_admin?'<span class="pill">admin</span>':''}</div>
+        <div class="sub">${esc(u.email)}</div>
+      </div>
+      <button class="btn ghost sm" onclick="toggleAdmin('${u.id}')">${u.is_admin?'Unadmin':'Make admin'}</button>
+      <button class="btn danger sm" onclick="delUser('${u.id}','${esc(u.username)}')">Delete</button>
+    </div>`).join('') || '<div class="muted">No users</div>';
+}
+
+function renderPosts(list){
+  document.getElementById('postsList').innerHTML = list.map(p => `
+    <div class="item">
+      <div class="grow">
+        <div class="sub">@${esc(p.username)}</div>
+        <div class="name" style="white-space:normal">${esc(p.content)||'[no text]'}</div>
+      </div>
+      <button class="btn danger sm" onclick="delPost('${p.id}')">Delete</button>
+    </div>`).join('') || '<div class="muted">No posts</div>';
+}
+
+async function toggleAdmin(id){
+  await api('/admin/users/'+id+'/toggle-admin', { method:'POST' });
+  loadAll();
+}
+async function delUser(id, name){
+  if(!confirm('Delete user @'+name+' and all their content?')) return;
+  const j = await api('/admin/users/'+id, { method:'DELETE' });
+  if(j.success!==true) alert(j.error||'Failed');
+  loadAll();
+}
+async function delPost(id){
+  if(!confirm('Delete this post?')) return;
+  await api('/admin/posts/'+id, { method:'DELETE' });
+  loadAll();
+}
+
+// auto-enter if we already have a token
+if(token){ enterDash(); }
+</script>
+</body>
+</html>

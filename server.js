@@ -3,6 +3,8 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import bcrypt from 'bcrypt';
+import path from 'path';
+import { fileURLToPath } from 'url';
 import rateLimit from 'express-rate-limit';
 import { createClient } from '@supabase/supabase-js';
 import { createServer } from 'http';
@@ -10,6 +12,7 @@ import { Server } from 'socket.io';
 import { RECOVERY_WORDS } from './wordlist.js';
 
 dotenv.config();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 /*
   Required Supabase tables (run once in SQL editor):
@@ -209,6 +212,9 @@ async function adminOnly(req, res, next) {
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
 
 app.get('/api/health', (req, res) => res.json({ success: true, message: 'Server is running!' }));
+
+// ─── ADMIN WEB PANEL (separate site, served by the backend) ──────────────────
+app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
