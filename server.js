@@ -199,6 +199,16 @@ function authRequired(req, res, next) {
   next();
 }
 
+// Map a list of user ids -> username in ONE query (avoids slow N+1 lookups).
+async function usernameMap(ids) {
+  const uniq = [...new Set((ids || []).filter(Boolean))];
+  if (uniq.length === 0) return {};
+  const { data } = await supabase.from('users').select('id, username').in('id', uniq);
+  const m = {};
+  (data || []).forEach((u) => { m[u.id] = u.username; });
+  return m;
+}
+
 // Allow only users with is_admin = true. Chain after authRequired.
 async function adminOnly(req, res, next) {
   try {
@@ -448,10 +458,10 @@ app.get('/api/posts/following', async (req, res) => {
     const { data: posts, error } = await supabase.from('posts').select('*').in('user_id', ids).order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', post.user_id);
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
       const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
       const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_liked: !!(like && like.length > 0), comments_count: comments?.length || 0 };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: !!(like && like.length > 0), comments_count: comments?.length || 0 };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -463,14 +473,14 @@ app.get('/api/posts', async (req, res) => {
     const { data: posts, error } = await supabase.from('posts').select('*').order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', post.user_id);
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
       const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
       let isLiked = false;
       if (userId) {
         const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
         isLiked = !!(like && like.length > 0);
       }
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_liked: isLiked, comments_count: comments?.length || 0 };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked, comments_count: comments?.length || 0 };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -858,11 +868,8 @@ app.get('/api/admin/posts', authRequired, adminOnly, async (req, res) => {
     const { data: posts, error } = await supabase
       .from('posts').select('*').order('created_at', { ascending: false }).limit(200);
     if (error) throw error;
-    const enriched = await Promise.all((posts || []).map(async (p) => {
-      const { data: u } = await supabase.from('users').select('username').eq('id', p.user_id);
-      return { ...p, username: u?.[0]?.username || 'Unknown' };
-    }));
-    res.json({ success: true, data: enriched });
+    const m = await usernameMap((posts || []).map((p) => p.user_id));
+    res.json({ success: true, data: (posts || []).map((p) => ({ ...p, username: m[p.user_id] || 'Unknown' })) });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -886,11 +893,44 @@ app.get('/api/admin/comments', authRequired, adminOnly, async (req, res) => {
     const { data: comments, error } = await supabase
       .from('comments').select('*').order('created_at', { ascending: false }).limit(200);
     if (error) throw error;
-    const enriched = await Promise.all((comments || []).map(async (cm) => {
-      const { data: u } = await supabase.from('users').select('username').eq('id', cm.user_id);
-      return { ...cm, username: u?.[0]?.username || 'Unknown' };
-    }));
-    res.json({ success: true, data: enriched });
+    const m = await usernameMap((comments || []).map((c) => c.user_id));
+    res.json({ success: true, data: (comments || []).map((c) => ({ ...c, username: m[c.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/admin/stories', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('stories').select('*').order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    const m = await usernameMap((data || []).map((s) => s.user_id));
+    res.json({ success: true, data: (data || []).map((s) => ({ ...s, username: m[s.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/admin/stories/:id', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { error } = await supabase.from('stories').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/admin/reels', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('reels').select('*').order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    const m = await usernameMap((data || []).map((r) => r.user_id));
+    res.json({ success: true, data: (data || []).map((r) => ({ ...r, username: m[r.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/admin/reels/:id', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { error } = await supabase.from('reels').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
