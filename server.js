@@ -732,6 +732,15 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {});
 });
 
+// ─── KEEP-ALIVE (anti-sleep for free Render) ─────────────────────────────────
+// Render's free instance sleeps after ~15 min without inbound traffic, which
+// causes a ~50s cold start. We ping our own public URL every 10 min so it
+// never goes idle. No external service or card needed.
+const SELF_URL = process.env.SELF_URL || 'https://sigma-social-backend.onrender.com';
+setInterval(() => {
+  fetch(`${SELF_URL}/api/health`).catch(() => {});
+}, 10 * 60 * 1000);
+
 // ─── START ────────────────────────────────────────────────────────────────────
 
 const PORT = process.env.PORT || 3000;
