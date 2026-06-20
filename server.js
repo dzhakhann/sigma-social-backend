@@ -10,6 +10,7 @@ import { createClient } from '@supabase/supabase-js';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { RECOVERY_WORDS } from './wordlist.js';
+import { runBots } from './bots.js';
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -442,6 +443,28 @@ app.get('/api/search/users', async (req, res) => {
     const { data, error } = await supabase.from('users').select('*').ilike('username', `%${q}%`).limit(20);
     if (error) throw error;
     res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── CHANNELS (content bots you can subscribe to) ──────────────────────────────
+app.get('/api/channels', async (req, res) => {
+  const { userId } = req.query;
+  try {
+    const { data: bots, error } = await supabase
+      .from('users')
+      .select('id, username, bio, avatar_url, is_verified, followers_count')
+      .like('email', '%@bots.local')
+      .order('followers_count', { ascending: false });
+    if (error) throw error;
+    let following = new Set();
+    if (userId) {
+      const { data: f } = await supabase.from('follows').select('following_id').eq('follower_id', userId);
+      following = new Set((f || []).map((x) => x.following_id));
+    }
+    res.json({
+      success: true,
+      data: (bots || []).map((b) => ({ ...b, is_following: following.has(b.id) })),
+    });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -934,6 +957,14 @@ app.delete('/api/admin/reels/:id', authRequired, adminOnly, async (req, res) => 
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Manually trigger the content bots (also runs automatically on a schedule).
+app.post('/api/admin/run-bots', authRequired, adminOnly, async (req, res) => {
+  try {
+    const posted = await runBots(supabase);
+    res.json({ success: true, posted });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 app.delete('/api/admin/comments/:id', authRequired, adminOnly, async (req, res) => {
   try {
     const reason = (req.body && req.body.reason) || '';
@@ -973,6 +1004,10 @@ const SELF_URL = process.env.SELF_URL || 'https://sigma-social-backend.onrender.
 setInterval(() => {
   fetch(`${SELF_URL}/api/health`).catch(() => {});
 }, 10 * 60 * 1000);
+
+// ─── CONTENT BOTS (auto-post fresh content several times a day) ───────────────
+setTimeout(() => { runBots(supabase).then((n) => console.log(`🤖 bots posted ${n}`)).catch(() => {}); }, 25 * 1000);
+setInterval(() => { runBots(supabase).catch(() => {}); }, 6 * 60 * 60 * 1000);
 
 // ─── START ────────────────────────────────────────────────────────────────────
 
