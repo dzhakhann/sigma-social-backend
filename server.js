@@ -59,6 +59,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
   -- Admin panel: mark which users are admins, then make YOURSELF admin:
   alter table users add column if not exists is_admin boolean default false;
+  alter table users add column if not exists is_verified boolean default false;
+  alter table users add column if not exists is_banned boolean default false;
+  alter table users add column if not exists ban_reason text;
   update users set is_admin = true where username = 'YOUR_USERNAME';
 */
 
@@ -275,6 +278,12 @@ app.post('/api/auth/login', async (req, res) => {
       }
     }
     if (!ok) return res.json({ success: false, error: 'Wrong username or password' });
+    if (user.is_banned === true) {
+      return res.json({
+        success: false,
+        error: `Account blocked${user.ban_reason ? ': ' + user.ban_reason : ''}`,
+      });
+    }
     const token = signToken({ sub: user.id, username: user.username });
     res.json({ success: true, data: { user, token } });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -752,7 +761,7 @@ app.put('/api/messages/:messageId', authRequired, async (req, res) => {
 
 app.get('/api/admin/stats', authRequired, adminOnly, async (req, res) => {
   try {
-    const out = {};
+    const out = { online: onlineCount() };
     for (const t of ['users', 'posts', 'comments', 'messages', 'stories', 'reels']) {
       const { count } = await supabase.from(t).select('*', { count: 'exact', head: true });
       out[t] = count || 0;
@@ -765,7 +774,7 @@ app.get('/api/admin/users', authRequired, adminOnly, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from('users')
-      .select('id, username, email, is_admin, followers_count, following_count, created_at')
+      .select('id, username, email, is_admin, is_verified, is_banned, ban_reason, followers_count, created_at')
       .order('created_at', { ascending: false });
     if (error) throw error;
     res.json({ success: true, data: data || [] });
@@ -773,13 +782,61 @@ app.get('/api/admin/users', authRequired, adminOnly, async (req, res) => {
 });
 
 app.delete('/api/admin/users/:id', authRequired, adminOnly, async (req, res) => {
+  const id = req.params.id;
   try {
-    if (req.params.id === req.userId) {
+    if (id === req.userId) {
       return res.json({ success: false, error: 'You cannot delete your own admin account' });
     }
-    const { error } = await supabase.from('users').delete().eq('id', req.params.id);
+    // Remove dependent rows first (some tables lack ON DELETE CASCADE).
+    await supabase.from('messages').delete().eq('sender_id', id);
+    await supabase.from('chats').delete().or(`user1_id.eq.${id},user2_id.eq.${id}`);
+    await supabase.from('follows').delete().or(`follower_id.eq.${id},following_id.eq.${id}`);
+    await supabase.from('likes').delete().eq('user_id', id);
+    await supabase.from('reel_likes').delete().eq('user_id', id);
+    await supabase.from('comments').delete().eq('user_id', id);
+    await supabase.from('stories').delete().eq('user_id', id);
+    await supabase.from('reels').delete().eq('user_id', id);
+    await supabase.from('posts').delete().eq('user_id', id);
+    await supabase.from('notifications').delete().or(`user_id.eq.${id},from_user_id.eq.${id}`);
+    const { error } = await supabase.from('users').delete().eq('id', id);
     if (error) throw error;
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Ban / unban (with reason → the user gets a notification)
+app.post('/api/admin/users/:id/ban', authRequired, adminOnly, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const { error } = await supabase.from('users')
+      .update({ is_banned: true, ban_reason: reason }).eq('id', req.params.id);
+    if (error) throw error;
+    await createNotification(req.params.id, req.userId, 'admin',
+      `Your account has been blocked.${reason ? ' Reason: ' + reason : ''}`);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/admin/users/:id/unban', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { error } = await supabase.from('users')
+      .update({ is_banned: false, ban_reason: null }).eq('id', req.params.id);
+    if (error) throw error;
+    await createNotification(req.params.id, req.userId, 'admin', 'Your account has been unblocked.');
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Verification checkmark (toggle → notify)
+app.post('/api/admin/users/:id/verify', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { data } = await supabase.from('users').select('is_verified').eq('id', req.params.id);
+    const next = !(data?.[0]?.is_verified === true);
+    const { error } = await supabase.from('users').update({ is_verified: next }).eq('id', req.params.id);
+    if (error) throw error;
+    await createNotification(req.params.id, req.userId, 'admin',
+      next ? 'Your account has been verified ✓' : 'Your verification was removed.');
+    res.json({ success: true, is_verified: next });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -808,18 +865,34 @@ app.get('/api/admin/posts', authRequired, adminOnly, async (req, res) => {
 
 app.delete('/api/admin/posts/:id', authRequired, adminOnly, async (req, res) => {
   try {
+    const reason = (req.body && req.body.reason) || '';
+    const { data: post } = await supabase.from('posts').select('user_id').eq('id', req.params.id);
+    if (post?.[0]) {
+      // No post_id on the notification — it would cascade-delete with the post.
+      await createNotification(post[0].user_id, req.userId, 'admin',
+        `Your post was removed by an admin.${reason ? ' Reason: ' + reason : ''}`);
+    }
     const { error } = await supabase.from('posts').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-// ─── WEBSOCKET ────────────────────────────────────────────────────────────────
+// ─── WEBSOCKET + ONLINE PRESENCE ──────────────────────────────────────────────
+
+const onlineSockets = new Map(); // socket.id -> userId
+function onlineCount() {
+  return new Set([...onlineSockets.values()].filter(Boolean)).size;
+}
 
 io.on('connection', (socket) => {
-  socket.on('user_connect', (data) => io.emit('user_online', data));
+  socket.on('user_connect', (data) => {
+    const uid = data && (data.userId || data.id) ? (data.userId || data.id) : data;
+    if (uid) onlineSockets.set(socket.id, String(uid));
+    io.emit('user_online', data);
+  });
   socket.on('send_message', (data) => io.emit('receive_message', data));
-  socket.on('disconnect', () => {});
+  socket.on('disconnect', () => onlineSockets.delete(socket.id));
 });
 
 // ─── KEEP-ALIVE (anti-sleep for free Render) ─────────────────────────────────
