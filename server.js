@@ -53,6 +53,10 @@ dotenv.config();
   alter table users add column if not exists location text;
   alter table users add column if not exists work text;
   alter table users add column if not exists website text;
+
+  -- Admin panel: mark which users are admins, then make YOURSELF admin:
+  alter table users add column if not exists is_admin boolean default false;
+  update users set is_admin = true where username = 'YOUR_USERNAME';
 */
 
 const app = express();
@@ -187,6 +191,19 @@ function authRequired(req, res, next) {
   }
   req.userId = payload.sub;
   next();
+}
+
+// Allow only users with is_admin = true. Chain after authRequired.
+async function adminOnly(req, res, next) {
+  try {
+    const { data } = await supabase.from('users').select('is_admin').eq('id', req.userId);
+    if (!data || data[0]?.is_admin !== true) {
+      return res.status(403).json({ success: false, error: 'Admin only' });
+    }
+    next();
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
 }
 
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
@@ -721,6 +738,73 @@ app.put('/api/messages/:messageId', authRequired, async (req, res) => {
     const { data, error } = await supabase.from('messages').update({ content, is_edited: true }).eq('id', req.params.messageId).select().single();
     if (error) throw error;
     res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── ADMIN ────────────────────────────────────────────────────────────────────
+// All admin routes require a valid token AND is_admin = true.
+
+app.get('/api/admin/stats', authRequired, adminOnly, async (req, res) => {
+  try {
+    const out = {};
+    for (const t of ['users', 'posts', 'comments', 'messages', 'stories', 'reels']) {
+      const { count } = await supabase.from(t).select('*', { count: 'exact', head: true });
+      out[t] = count || 0;
+    }
+    res.json({ success: true, data: out });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/admin/users', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('users')
+      .select('id, username, email, is_admin, followers_count, following_count, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/admin/users/:id', authRequired, adminOnly, async (req, res) => {
+  try {
+    if (req.params.id === req.userId) {
+      return res.json({ success: false, error: 'You cannot delete your own admin account' });
+    }
+    const { error } = await supabase.from('users').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/admin/users/:id/toggle-admin', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { data } = await supabase.from('users').select('is_admin').eq('id', req.params.id);
+    const next = !(data?.[0]?.is_admin === true);
+    const { error } = await supabase.from('users').update({ is_admin: next }).eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true, is_admin: next });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/admin/posts', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { data: posts, error } = await supabase
+      .from('posts').select('*').order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    const enriched = await Promise.all((posts || []).map(async (p) => {
+      const { data: u } = await supabase.from('users').select('username').eq('id', p.user_id);
+      return { ...p, username: u?.[0]?.username || 'Unknown' };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/admin/posts/:id', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { error } = await supabase.from('posts').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
