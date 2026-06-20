@@ -102,9 +102,11 @@
     <div class="tabs">
       <button class="tab on" id="tabUsers" onclick="showTab('users')">Users</button>
       <button class="tab" id="tabPosts" onclick="showTab('posts')">Posts</button>
+      <button class="tab" id="tabComments" onclick="showTab('comments')">Comments</button>
     </div>
     <div id="usersList"></div>
     <div id="postsList" style="display:none"></div>
+    <div id="commentsList" style="display:none"></div>
   </div>
 </div>
 
@@ -133,10 +135,10 @@ function logout(){token='';localStorage.removeItem('admin_token');show('dash',fa
 function enter(){show('login',false);show('dash',true);loadAll();}
 
 function showTab(t){
-  document.getElementById('tabUsers').classList.toggle('on',t==='users');
-  document.getElementById('tabPosts').classList.toggle('on',t==='posts');
-  document.getElementById('usersList').style.display=t==='users'?'block':'none';
-  document.getElementById('postsList').style.display=t==='posts'?'block':'none';
+  for(const k of ['users','posts','comments']){
+    document.getElementById('tab'+k[0].toUpperCase()+k.slice(1)).classList.toggle('on',t===k);
+    document.getElementById(k+'List').style.display=t===k?'block':'none';
+  }
 }
 
 async function api(path,opts={}){
@@ -151,8 +153,9 @@ async function jdel(path,body){return api(path,{method:'DELETE',
 
 async function loadAll(){
   try{
-    const [s,u,p]=await Promise.all([api('/admin/stats'),api('/admin/users'),api('/admin/posts')]);
-    renderStats(s.data||{}); renderUsers(u.data||[]); renderPosts(p.data||[]);
+    const [s,u,p,cm]=await Promise.all([api('/admin/stats'),api('/admin/users'),
+      api('/admin/posts'),api('/admin/comments')]);
+    renderStats(s.data||{}); renderUsers(u.data||[]); renderPosts(p.data||[]); renderComments(cm.data||[]);
   }catch(e){}
 }
 function esc(s){return (s||'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -195,6 +198,22 @@ function renderPosts(list){
       </div>
       <button class="btn danger sm" onclick="delPost('${p.id}')">Delete</button>
     </div>`).join('')||'<div class="muted">No posts</div>';
+}
+
+function renderComments(list){
+  document.getElementById('commentsList').innerHTML=list.map(cm=>`
+    <div class="item">
+      <div class="grow">
+        <div class="sub">@${esc(cm.username)}</div>
+        <div style="margin-top:4px">${esc(cm.content)||'<span class="muted">[empty]</span>'}</div>
+      </div>
+      <button class="btn danger sm" onclick="delComment('${cm.id}')">Delete</button>
+    </div>`).join('')||'<div class="muted">No comments</div>';
+}
+async function delComment(id){
+  const reason=prompt('Reason for removing this comment (the author will be notified):');
+  if(reason===null)return;
+  await jdel('/admin/comments/'+id,{reason});loadAll();
 }
 
 async function verify(id){await jpost('/admin/users/'+id+'/verify');loadAll();}

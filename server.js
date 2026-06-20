@@ -217,7 +217,10 @@ async function adminOnly(req, res, next) {
 app.get('/api/health', (req, res) => res.json({ success: true, message: 'Server is running!' }));
 
 // ─── ADMIN WEB PANEL (separate site, served by the backend) ──────────────────
-app.get('/admin', (req, res) => res.sendFile(path.join(__dirname, 'public', 'admin.html')));
+app.get('/admin', (req, res) => {
+  res.set('Cache-Control', 'no-store'); // always serve the latest admin UI
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+});
 
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
@@ -873,6 +876,33 @@ app.delete('/api/admin/posts/:id', authRequired, adminOnly, async (req, res) => 
         `Your post was removed by an admin.${reason ? ' Reason: ' + reason : ''}`);
     }
     const { error } = await supabase.from('posts').delete().eq('id', req.params.id);
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/admin/comments', authRequired, adminOnly, async (req, res) => {
+  try {
+    const { data: comments, error } = await supabase
+      .from('comments').select('*').order('created_at', { ascending: false }).limit(200);
+    if (error) throw error;
+    const enriched = await Promise.all((comments || []).map(async (cm) => {
+      const { data: u } = await supabase.from('users').select('username').eq('id', cm.user_id);
+      return { ...cm, username: u?.[0]?.username || 'Unknown' };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/admin/comments/:id', authRequired, adminOnly, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const { data: cm } = await supabase.from('comments').select('user_id').eq('id', req.params.id);
+    if (cm?.[0]) {
+      await createNotification(cm[0].user_id, req.userId, 'admin',
+        `Your comment was removed by an admin.${reason ? ' Reason: ' + reason : ''}`);
+    }
+    const { error } = await supabase.from('comments').delete().eq('id', req.params.id);
     if (error) throw error;
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
