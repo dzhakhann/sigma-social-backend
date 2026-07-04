@@ -82,6 +82,27 @@ export async function ensureBots(supabase) {
 // ─── Fetchers ────────────────────────────────────────────────────────────────
 const UA = { 'User-Agent': 'sigma-social-bot/1.0' };
 
+function decodeHtmlEntities(url) {
+  return (url || '').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+}
+
+function extractRedditImage(p) {
+  // 1) Direct image post
+  if (p.post_hint === 'image' || /\.(jpg|jpeg|png|gif)(\?.*)?$/i.test(p.url || '')) {
+    return decodeHtmlEntities(p.url);
+  }
+  // 2) preview.images[0].source.url
+  try {
+    const src = p.preview?.images?.[0]?.source?.url;
+    if (src) return decodeHtmlEntities(src);
+  } catch (_) {}
+  // 3) thumbnail (must be a real URL ending in image ext)
+  if (p.thumbnail && /^https?:\/\/.+\.(jpg|jpeg|png|gif)/i.test(p.thumbnail)) {
+    return decodeHtmlEntities(p.thumbnail);
+  }
+  return null;
+}
+
 async function fetchReddit(sub, imagesOnly) {
   const r = await fetch(`https://www.reddit.com/r/${sub}/top.json?t=day&limit=25`, { headers: UA });
   const j = await r.json();
@@ -89,13 +110,12 @@ async function fetchReddit(sub, imagesOnly) {
   if (imagesOnly) {
     return posts
       .filter((p) => p.post_hint === 'image' || /\.(jpg|jpeg|png|gif)$/i.test(p.url || ''))
-      .map((p) => ({ title: p.title, image: p.url }));
+      .map((p) => ({ title: p.title, image: decodeHtmlEntities(p.url) }));
   }
+  // For non-image channels: extract image if available, content = title only (no link)
   return posts.map((p) => ({
     title: p.title,
-    link: p.url_overridden_by_dest && !/redd\.it|reddit\.com/.test(p.url_overridden_by_dest)
-      ? p.url_overridden_by_dest
-      : 'https://reddit.com' + p.permalink,
+    image: extractRedditImage(p),
   }));
 }
 
@@ -108,15 +128,24 @@ function clean(s) {
     .trim();
 }
 
+function extractRSSImage(block) {
+  // <enclosure url="...">
+  const enc = block.match(/<enclosure[^>]+url=["']([^"']+)["']/i);
+  if (enc && enc[1]) return clean(enc[1]);
+  // <media:content url="...">
+  const media = block.match(/<media:content[^>]+url=["']([^"']+)["']/i);
+  if (media && media[1]) return clean(media[1]);
+  return null;
+}
+
 async function fetchRSS(url) {
   const r = await fetch(url, { headers: UA });
   const xml = await r.text();
   const items = [];
   for (const block of xml.split(/<item[ >]/i).slice(1, 20)) {
     const title = (block.match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || '';
-    const link = (block.match(/<link>([\s\S]*?)<\/link>/i) || [])[1] || '';
     const t = clean(title);
-    if (t) items.push({ title: t, link: clean(link) });
+    if (t) items.push({ title: t, image: extractRSSImage(block) });
   }
   return items;
 }
@@ -135,13 +164,14 @@ export async function runBots(supabase) {
         const items = await fetchReddit(ch.sub, ch.images);
         if (!items.length) continue;
         const it = pick(items);
-        if (ch.images) { image = it.image; content = it.title || ''; }
-        else { content = `${it.title}${it.link ? '\n\n' + it.link : ''}`; }
+        content = it.title || '';
+        image = it.image || null;
       } else {
         const items = await fetchRSS(ch.url);
         if (!items.length) continue;
         const it = pick(items);
-        content = `${it.title}${it.link ? '\n\n' + it.link : ''}`;
+        content = it.title || '';
+        image = it.image || null;
       }
       if (!content && !image) continue;
       const key = ch.user + '|' + (image || content).slice(0, 120);
@@ -150,6 +180,20 @@ export async function runBots(supabase) {
       await supabase.from('posts').insert([{
         user_id: botId, content, image_url: image || null, likes_count: 0,
       }]);
+      // Notify followers of this channel
+      try {
+        const { data: followers } = await supabase.from('follows').select('follower_id').eq('following_id', botId);
+        if (followers && followers.length > 0) {
+          const notifs = followers.map(f => ({
+            user_id: f.follower_id,
+            from_user_id: botId,
+            type: 'channel_post',
+            message: `${ch.bio}: ${(content || '').slice(0, 60)}`,
+            is_read: false,
+          }));
+          await supabase.from('notifications').insert(notifs);
+        }
+      } catch (_) {}
       posted++;
     } catch (_) { /* skip channel on error */ }
   }

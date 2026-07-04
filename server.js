@@ -57,6 +57,22 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
   alter table users add column if not exists location text;
   alter table users add column if not exists work text;
   alter table users add column if not exists website text;
+  alter table users add column if not exists education text;
+  alter table users add column if not exists birthday text;
+
+  -- Yearly goals (Sigmacta MVP): each user's goals for a given year.
+  create table if not exists goals (
+    id uuid default gen_random_uuid() primary key,
+    user_id uuid references users(id) on delete cascade,
+    title text not null,
+    category text default 'personal',   -- career | study | health | finance | personal
+    progress integer default 0,          -- 0..100
+    status text default 'active',        -- active | done
+    year integer not null,
+    note text default '',
+    created_at timestamptz default now(),
+    completed_at timestamptz
+  );
 
   -- Admin panel: mark which users are admins, then make YOURSELF admin:
   alter table users add column if not exists is_admin boolean default false;
@@ -380,7 +396,7 @@ app.get('/api/users/:userId', async (req, res) => {
 
 app.post('/api/users/:userId/update', authRequired, async (req, res) => {
   if (req.params.userId !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
-  const { username, bio, avatar_url, headline, about, location, work, website } = req.body;
+  const { username, bio, avatar_url, headline, about, location, work, website, education, birthday } = req.body;
   try {
     // Only update fields that were actually sent (partial updates supported).
     const update = {};
@@ -392,6 +408,8 @@ app.post('/api/users/:userId/update', authRequired, async (req, res) => {
     if (location !== undefined) update.location = location;
     if (work !== undefined) update.work = work;
     if (website !== undefined) update.website = website;
+    if (education !== undefined) update.education = education;
+    if (birthday !== undefined) update.birthday = birthday;
     const { data, error } = await supabase.from('users').update(update).eq('id', req.params.userId).select();
     if (error) throw error;
     res.json({ success: true, data: data[0] });
@@ -446,6 +464,25 @@ app.get('/api/search/users', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+app.get('/api/search/posts', async (req, res) => {
+  const { q, userId } = req.query;
+  if (!q || q.trim().length === 0) return res.json({ success: true, data: [] });
+  try {
+    const { data: posts, error } = await supabase.from('posts').select('*').ilike('content', `%${q}%`).order('created_at', { ascending: false }).limit(30);
+    if (error) throw error;
+    const enriched = await Promise.all((posts || []).map(async (post) => {
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      let isLiked = false;
+      if (userId) {
+        const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
+        isLiked = !!(like && like.length > 0);
+      }
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── CHANNELS (content bots you can subscribe to) ──────────────────────────────
 app.get('/api/channels', async (req, res) => {
   const { userId } = req.query;
@@ -468,6 +505,102 @@ app.get('/api/channels', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── GOALS (Sigmacta MVP: yearly goals + Wrapped) ──────────────────────────────
+app.get('/api/goals', async (req, res) => {
+  const { userId, year } = req.query;
+  if (!userId) return res.json({ success: true, data: [] });
+  try {
+    let q = supabase.from('goals').select('*').eq('user_id', userId);
+    if (year) q = q.eq('year', Number(year));
+    const { data, error } = await q.order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/goals', authRequired, async (req, res) => {
+  const { title, category, year, note } = req.body;
+  if (!title || !title.trim()) return res.json({ success: false, error: 'Title required' });
+  try {
+    const { data, error } = await supabase.from('goals').insert([{
+      user_id: req.userId,
+      title: title.trim(),
+      category: category || 'personal',
+      year: Number(year) || new Date().getFullYear(),
+      note: note || '',
+      progress: 0,
+      status: 'active',
+    }]).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/goals/:id/update', authRequired, async (req, res) => {
+  const { title, category, note, progress, status } = req.body;
+  try {
+    const { data: g } = await supabase.from('goals').select('user_id').eq('id', req.params.id).single();
+    if (!g || g.user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    const update = {};
+    if (title !== undefined) update.title = title;
+    if (category !== undefined) update.category = category;
+    if (note !== undefined) update.note = note;
+    if (progress !== undefined) {
+      const p = Math.max(0, Math.min(100, Number(progress)));
+      update.progress = p;
+      if (p >= 100) { update.status = 'done'; update.completed_at = new Date().toISOString(); }
+      else { update.status = 'active'; update.completed_at = null; }
+    }
+    if (status !== undefined) {
+      update.status = status;
+      if (status === 'done') { update.progress = 100; update.completed_at = new Date().toISOString(); }
+    }
+    const { data, error } = await supabase.from('goals').update(update).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/goals/:id', authRequired, async (req, res) => {
+  try {
+    const { data: g } = await supabase.from('goals').select('user_id').eq('id', req.params.id).single();
+    if (!g || g.user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    await supabase.from('goals').delete().eq('id', req.params.id);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Wrapped / Year-in-Review stats built from this year's goals.
+app.get('/api/goals/wrapped', async (req, res) => {
+  const { userId } = req.query;
+  const year = Number(req.query.year) || new Date().getFullYear();
+  if (!userId) return res.json({ success: false, error: 'userId required' });
+  try {
+    const { data: goals } = await supabase.from('goals').select('*').eq('user_id', userId).eq('year', year);
+    const list = goals || [];
+    const done = list.filter((g) => g.status === 'done');
+    const byCat = {};
+    for (const g of list) byCat[g.category] = (byCat[g.category] || 0) + 1;
+    let topCategory = null, topCount = 0;
+    for (const k of Object.keys(byCat)) if (byCat[k] > topCount) { topCount = byCat[k]; topCategory = k; }
+    const avgProgress = list.length
+      ? Math.round(list.reduce((s, g) => s + (g.progress || 0), 0) / list.length) : 0;
+    res.json({
+      success: true,
+      data: {
+        year,
+        total: list.length,
+        completed: done.length,
+        completionRate: list.length ? Math.round((done.length / list.length) * 100) : 0,
+        avgProgress,
+        topCategory,
+        byCategory: byCat,
+        highlights: done.map((g) => ({ title: g.title, category: g.category })).slice(0, 8),
+      },
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
 // Following feed
@@ -485,6 +618,31 @@ app.get('/api/posts/following', async (req, res) => {
       const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
       const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
       return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: !!(like && like.length > 0), comments_count: comments?.length || 0 };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Trending: top posts by likes in last 24h
+app.get('/api/posts/trending', async (req, res) => {
+  const { userId } = req.query;
+  try {
+    const since = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const { data: posts, error } = await supabase
+      .from('posts')
+      .select('*')
+      .gte('created_at', since)
+      .order('likes_count', { ascending: false })
+      .limit(20);
+    if (error) throw error;
+    const enriched = await Promise.all(posts.map(async (post) => {
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      let isLiked = false;
+      if (userId) {
+        const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
+        isLiked = !!(like && like.length > 0);
+      }
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
