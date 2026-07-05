@@ -753,6 +753,38 @@ app.get('/api/gifs', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── LINK PREVIEW (Open Graph unfurl — Telegram-style) ────────────────────────
+const _linkCache = new Map();
+app.get('/api/link-preview', async (req, res) => {
+  const url = (req.query.url || '').toString();
+  if (!/^https?:\/\//.test(url)) return res.json({ success: false });
+  if (_linkCache.has(url)) return res.json({ success: true, data: _linkCache.get(url) });
+  try {
+    const r = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SigmactaBot/1.0; +https://sigmacta.app)' },
+      redirect: 'follow',
+    });
+    const html = (await r.text()).slice(0, 300000); // cap
+    const pick = (prop) => {
+      const a = html.match(new RegExp(`<meta[^>]+(?:property|name)=["']${prop}["'][^>]+content=["']([^"']*)["']`, 'i'));
+      const b = html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${prop}["']`, 'i'));
+      return (a && a[1]) || (b && b[1]) || null;
+    };
+    const dec = (s) => s ? s.replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+      .replace(/&#0?39;/g, "'").replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>') : s;
+    const data = {
+      title: dec(pick('og:title') || (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || ''),
+      description: dec(pick('og:description') || pick('description') || ''),
+      image: dec(pick('og:image') || pick('twitter:image')),
+      siteName: dec(pick('og:site_name')) || (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })(),
+      url,
+    };
+    if (_linkCache.size > 500) _linkCache.clear();
+    _linkCache.set(url, data);
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
 // Following feed
