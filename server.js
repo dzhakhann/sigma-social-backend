@@ -651,12 +651,43 @@ async function callGemini(system, messages) {
 }
 
 // Chat with the Sigmacta AI assistant.
-app.post('/api/ai/chat', authRequired, async (req, res) => {
-  const system =
-    'Ты — дружелюбный ИИ-ассистент приложения Sigmacta. Помогаешь ставить и ' +
-    'достигать личные цели, мотивируешь, даёшь конкретные шаги. Отвечай коротко, ' +
-    'тепло и по делу, на языке пользователя (обычно русский).';
+async function buildUserContext(uid) {
   try {
+    const { data: rows } = await supabase.from('users')
+      .select('username, first_name, last_name, gender, birthday, birthplace, education, work, skills, about, location')
+      .eq('id', uid);
+    const u = rows && rows[0];
+    const year = new Date().getFullYear();
+    const { data: goals } = await supabase.from('goals')
+      .select('title, category, progress, status').eq('user_id', uid).eq('year', year);
+    const profile = u ? [
+      u.first_name ? `имя: ${u.first_name}` : `ник: ${u.username}`,
+      u.gender && `пол: ${u.gender}`,
+      u.birthday && `дата рождения: ${u.birthday}`,
+      u.location && `город: ${u.location}`,
+      u.work && `работа: ${u.work}`,
+      u.education && `учёба: ${u.education}`,
+      u.skills && `навыки/хобби: ${u.skills}`,
+      u.about && `о себе: ${u.about}`,
+    ].filter(Boolean).join('; ') : 'не заполнен';
+    const goalsText = (goals || []).map((g) =>
+      `- ${g.title} (${g.category}, ${g.progress}%${g.status === 'done' ? ', выполнено' : ''})`).join('\n') || 'целей пока нет';
+    return { profile, goalsText, year };
+  } catch (_) {
+    return { profile: 'не заполнен', goalsText: 'целей пока нет', year: new Date().getFullYear() };
+  }
+}
+
+app.post('/api/ai/chat', authRequired, async (req, res) => {
+  try {
+    const { profile, goalsText, year } = await buildUserContext(req.userId);
+    const system =
+      'Ты — персональный ИИ-коуч приложения Sigmacta. Ты знаешь этого пользователя ' +
+      'и подстраиваешься под него.\n' +
+      `Профиль: ${profile}.\n` +
+      `Цели на ${year}:\n${goalsText}\n` +
+      'Помогай ставить и достигать цели, мотивируй, давай конкретные шаги. ' +
+      'Обращайся по имени, если оно известно. Отвечай коротко, тепло, на языке пользователя.';
     const reply = await callGemini(system, req.body.messages);
     res.json({
       success: true,
