@@ -802,6 +802,20 @@ app.post('/api/posts', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Delete your own post (with its comments + likes).
+app.delete('/api/posts/:postId', authRequired, async (req, res) => {
+  try {
+    const { data: rows } = await supabase.from('posts').select('user_id').eq('id', req.params.postId);
+    const post = rows && rows[0];
+    if (!post) return res.json({ success: false, error: 'Not found' });
+    if (post.user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    await supabase.from('comments').delete().eq('post_id', req.params.postId);
+    await supabase.from('likes').delete().eq('post_id', req.params.postId);
+    await supabase.from('posts').delete().eq('id', req.params.postId);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── LIKES ────────────────────────────────────────────────────────────────────
 
 app.post('/api/posts/:postId/like', authRequired, async (req, res) => {
