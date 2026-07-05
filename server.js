@@ -726,6 +726,27 @@ app.get('/api/ai/recommend', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── GIF SEARCH (Giphy proxy — key stays on the server) ───────────────────────
+// Tenor was shut down by Google on 2026-06-30, so we use Giphy instead.
+const GIPHY_KEY = process.env.GIPHY_API_KEY || '';
+app.get('/api/gifs', async (req, res) => {
+  const q = (req.query.q || '').toString().trim();
+  if (!GIPHY_KEY) return res.json({ success: true, data: [] });
+  try {
+    const url = q
+      ? `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(q)}&limit=24&rating=pg-13&bundle=fixed_width_downsampled`
+      : `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_KEY}&limit=24&rating=pg-13&bundle=fixed_width_downsampled`;
+    const r = await fetch(url);
+    const j = await r.json();
+    const gifs = (j.data || []).map((g) => ({
+      preview: g.images?.fixed_width_downsampled?.url ||
+        g.images?.fixed_width?.url || g.images?.original?.url,
+      full: g.images?.original?.url,
+    })).filter((x) => x.full);
+    res.json({ success: true, data: gifs });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
 // Following feed
