@@ -624,6 +624,76 @@ app.get('/api/goals/wrapped', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── AI (Google Gemini — key stays on the server, never in the app) ───────────
+const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_URL =
+  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+
+async function callGemini(system, messages) {
+  if (!GEMINI_KEY) return null;
+  const contents = (messages || []).map((m) => ({
+    role: m.role === 'model' ? 'model' : 'user',
+    parts: [{ text: String(m.text || '') }],
+  }));
+  const body = {
+    contents,
+    ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
+    generationConfig: { temperature: 0.8, maxOutputTokens: 800 },
+  };
+  const r = await fetch(`${GEMINI_URL}?key=${GEMINI_KEY}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const j = await r.json();
+  return (j?.candidates?.[0]?.content?.parts || []).map((p) => p.text).join('') || null;
+}
+
+// Chat with the Sigmacta AI assistant.
+app.post('/api/ai/chat', authRequired, async (req, res) => {
+  const system =
+    'Ты — дружелюбный ИИ-ассистент приложения Sigmacta. Помогаешь ставить и ' +
+    'достигать личные цели, мотивируешь, даёшь конкретные шаги. Отвечай коротко, ' +
+    'тепло и по делу, на языке пользователя (обычно русский).';
+  try {
+    const reply = await callGemini(system, req.body.messages);
+    res.json({
+      success: true,
+      reply: reply || 'ИИ временно недоступен. Попробуй чуть позже.',
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Personalized recommendations built from the user's goals.
+app.get('/api/ai/recommend', authRequired, async (req, res) => {
+  try {
+    const uid = req.userId;
+    const year = new Date().getFullYear();
+    const { data: goals } = await supabase.from('goals')
+      .select('title, category, progress, status').eq('user_id', uid).eq('year', year);
+    const list = goals || [];
+    if (list.length === 0) {
+      return res.json({
+        success: true,
+        text: 'Поставь первую цель на год — и я подскажу, с чего начать двигаться к ней.',
+      });
+    }
+    const goalsText = list.map((g) =>
+      `- ${g.title} (${g.category}, ${g.progress}%${g.status === 'done' ? ', выполнено' : ''})`).join('\n');
+    const system =
+      'Ты — персональный коуч Sigmacta. На основе целей пользователя дай 3 коротких ' +
+      'конкретных совета, что сделать на этой неделе и что улучшить (привычки, сон, ' +
+      'питание, фокус), чтобы двигаться к целям. Пиши тепло, по-русски, буллетами, без воды. Максимум 4 строки.';
+    const reply = await callGemini(system, [
+      { role: 'user', text: `Мои цели на год:\n${goalsText}\n\nДай рекомендации.` },
+    ]);
+    res.json({
+      success: true,
+      text: reply || 'Совет: выбери одну цель и сделай сегодня один маленький шаг к ней.',
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
 // Following feed
