@@ -626,8 +626,9 @@ app.get('/api/goals/wrapped', async (req, res) => {
 
 // ─── AI (Google Gemini — key stays on the server, never in the app) ───────────
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const GEMINI_URL =
-  'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+  `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 async function callGemini(system, messages) {
   if (!GEMINI_KEY) return null;
