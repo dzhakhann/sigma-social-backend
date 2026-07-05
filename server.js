@@ -60,6 +60,17 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
   alter table users add column if not exists education text;
   alter table users add column if not exists birthday text;
 
+  -- Full registration profile (Sigmacta):
+  alter table users add column if not exists first_name text;
+  alter table users add column if not exists last_name text;
+  alter table users add column if not exists middle_name text;
+  alter table users add column if not exists gender text;
+  alter table users add column if not exists birthplace text;
+  alter table users add column if not exists relationship text;
+  alter table users add column if not exists skills text;          -- languages, subjects, sports, hobbies
+  alter table users add column if not exists hidden_fields jsonb default '[]'::jsonb; -- privacy: field keys the user hides
+  alter table users add column if not exists is_pro boolean default false;           -- Sigmacta Pro subscription
+
   -- Yearly goals (Sigmacta MVP): each user's goals for a given year.
   create table if not exists goals (
     id uuid default gen_random_uuid() primary key,
@@ -396,7 +407,11 @@ app.get('/api/users/:userId', async (req, res) => {
 
 app.post('/api/users/:userId/update', authRequired, async (req, res) => {
   if (req.params.userId !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
-  const { username, bio, avatar_url, headline, about, location, work, website, education, birthday } = req.body;
+  const {
+    username, bio, avatar_url, headline, about, location, work, website,
+    education, birthday, first_name, last_name, middle_name, gender,
+    birthplace, relationship, skills, hidden_fields,
+  } = req.body;
   try {
     // Only update fields that were actually sent (partial updates supported).
     const update = {};
@@ -410,6 +425,14 @@ app.post('/api/users/:userId/update', authRequired, async (req, res) => {
     if (website !== undefined) update.website = website;
     if (education !== undefined) update.education = education;
     if (birthday !== undefined) update.birthday = birthday;
+    if (first_name !== undefined) update.first_name = first_name;
+    if (last_name !== undefined) update.last_name = last_name;
+    if (middle_name !== undefined) update.middle_name = middle_name;
+    if (gender !== undefined) update.gender = gender;
+    if (birthplace !== undefined) update.birthplace = birthplace;
+    if (relationship !== undefined) update.relationship = relationship;
+    if (skills !== undefined) update.skills = skills;
+    if (hidden_fields !== undefined) update.hidden_fields = hidden_fields;
     const { data, error } = await supabase.from('users').update(update).eq('id', req.params.userId).select();
     if (error) throw error;
     res.json({ success: true, data: data[0] });
@@ -1163,9 +1186,9 @@ setInterval(() => {
   fetch(`${SELF_URL}/api/health`).catch(() => {});
 }, 10 * 60 * 1000);
 
-// ─── CONTENT BOTS (auto-post fresh content several times a day) ───────────────
-setTimeout(() => { runBots(supabase).then((n) => console.log(`🤖 bots posted ${n}`)).catch(() => {}); }, 25 * 1000);
-setInterval(() => { runBots(supabase).catch(() => {}); }, 6 * 60 * 60 * 1000);
+// ─── CONTENT BOTS (disabled — channels/bots removed for the Sigmacta app) ─────
+// setTimeout(() => { runBots(supabase).then((n) => console.log(`🤖 bots posted ${n}`)).catch(() => {}); }, 25 * 1000);
+// setInterval(() => { runBots(supabase).catch(() => {}); }, 6 * 60 * 60 * 1000);
 
 // ─── START ────────────────────────────────────────────────────────────────────
 
