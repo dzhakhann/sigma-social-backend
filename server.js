@@ -806,6 +806,17 @@ app.delete('/api/stories/:storyId', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// All stories by a user (including expired) — for the profile "History" archive.
+app.get('/api/stories/user/:userId', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('stories')
+      .select('*').eq('user_id', req.params.userId)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
 app.get('/api/notifications', async (req, res) => {
