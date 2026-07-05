@@ -794,7 +794,7 @@ app.get('/api/posts/following', async (req, res) => {
   try {
     const { data: follows } = await supabase.from('follows').select('following_id').eq('follower_id', userId);
     const ids = (follows || []).map(f => f.following_id);
-    if (ids.length === 0) return res.json({ success: true, data: [] });
+    ids.push(userId); // include the user's own posts in their feed
     const { data: posts, error } = await supabase.from('posts').select('*').in('user_id', ids).order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
