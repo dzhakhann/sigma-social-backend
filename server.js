@@ -541,9 +541,9 @@ app.get('/api/channels', async (req, res) => {
 });
 
 // ─── GOALS (Sigmacta MVP: yearly goals + Wrapped) ──────────────────────────────
-app.get('/api/goals', async (req, res) => {
-  const { userId, year } = req.query;
-  if (!userId) return res.json({ success: true, data: [] });
+app.get('/api/goals', authRequired, async (req, res) => {
+  const userId = req.userId;
+  const { year } = req.query;
   try {
     let q = supabase.from('goals').select('*').eq('user_id', userId);
     if (year) q = q.eq('year', Number(year));
@@ -1026,9 +1026,8 @@ app.get('/api/stories/user/:userId', async (req, res) => {
 
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
-app.get('/api/notifications', async (req, res) => {
-  const { userId } = req.query;
-  if (!userId) return res.json({ success: false, error: 'Missing userId' });
+app.get('/api/notifications', authRequired, async (req, res) => {
+  const userId = req.userId;
   try {
     const { data, error } = await supabase.from('notifications').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(50);
     if (error) throw error;
@@ -1109,8 +1108,8 @@ app.post('/api/reels/:reelId/like', authRequired, async (req, res) => {
 
 // ─── CHATS ────────────────────────────────────────────────────────────────────
 
-app.get('/api/chats', async (req, res) => {
-  const { userId } = req.query;
+app.get('/api/chats', authRequired, async (req, res) => {
+  const userId = req.userId;
   try {
     const { data: chats, error } = await supabase.from('chats').select('*').or(`user1_id.eq.${userId},user2_id.eq.${userId}`);
     if (error) throw error;
@@ -1138,8 +1137,14 @@ app.post('/api/chats/get-or-create', authRequired, async (req, res) => {
 
 // ─── MESSAGES ─────────────────────────────────────────────────────────────────
 
-app.get('/api/messages/:chatId', async (req, res) => {
+app.get('/api/messages/:chatId', authRequired, async (req, res) => {
   try {
+    // Only participants of the chat may read its messages.
+    const { data: chat } = await supabase.from('chats').select('user1_id, user2_id').eq('id', req.params.chatId);
+    if (!chat || chat.length === 0) return res.json({ success: false, error: 'Chat not found' });
+    if (chat[0].user1_id !== req.userId && chat[0].user2_id !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
     const { data, error } = await supabase.from('messages').select('*').eq('chat_id', req.params.chatId).order('created_at', { ascending: true });
     if (error) throw error;
     res.json({ success: true, data: data || [] });
