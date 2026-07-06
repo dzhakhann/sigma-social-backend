@@ -70,6 +70,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
   alter table users add column if not exists skills text;          -- languages, subjects, sports, hobbies
   alter table users add column if not exists hidden_fields jsonb default '[]'::jsonb; -- privacy: field keys the user hides
   alter table users add column if not exists is_pro boolean default false;           -- Sigmacta Pro subscription
+  alter table comments add column if not exists is_edited boolean default false;      -- comment editing
 
   -- Yearly goals (Sigmacta MVP): each user's goals for a given year.
   create table if not exists goals (
@@ -401,7 +402,17 @@ app.get('/api/users/:userId', async (req, res) => {
     const { data, error } = await supabase.from('users').select('*').eq('id', req.params.userId);
     if (error) throw error;
     if (!data || data.length === 0) return res.json({ success: false, error: 'User not found' });
-    res.json({ success: true, data: data[0] });
+    const user = data[0];
+    // Live counts for the profile header (🎯 goals · 📝 posts).
+    const { count: postsCount } = await supabase.from('posts')
+      .select('*', { count: 'exact', head: true }).eq('user_id', user.id);
+    const year = new Date().getFullYear();
+    const { count: goalsCount } = await supabase.from('goals')
+      .select('*', { count: 'exact', head: true }).eq('user_id', user.id).eq('year', year);
+    res.json({
+      success: true,
+      data: { ...user, posts_count: postsCount || 0, goals_count: goalsCount || 0 },
+    });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -443,6 +454,7 @@ app.post('/api/users/:userId/follow/:targetUserId', authRequired, async (req, re
   const userId = req.userId;
   const { targetUserId } = req.params;
   try {
+    if (userId === targetUserId) return res.json({ success: false, error: 'Cannot follow yourself' });
     const { data: ex } = await supabase.from('follows').select('id').eq('follower_id', userId).eq('following_id', targetUserId);
     if (ex && ex.length > 0) return res.json({ success: false, error: 'Already following' });
     await supabase.from('follows').insert([{ follower_id: userId, following_id: targetUserId }]);
@@ -937,6 +949,26 @@ app.delete('/api/comments/:commentId', authRequired, async (req, res) => {
     const { error } = await supabase.from('comments').delete().eq('id', req.params.commentId);
     if (error) throw error;
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Edit your own comment.
+app.put('/api/comments/:commentId', authRequired, async (req, res) => {
+  const { content } = req.body;
+  if (!content || !content.trim()) return res.json({ success: false, error: 'Empty comment' });
+  try {
+    const { data: existing } = await supabase.from('comments').select('user_id').eq('id', req.params.commentId);
+    if (!existing || existing.length === 0) return res.json({ success: false, error: 'Not found' });
+    if (existing[0].user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    // Try with is_edited; if that column doesn't exist yet, fall back.
+    let { data, error } = await supabase.from('comments')
+      .update({ content: content.trim(), is_edited: true }).eq('id', req.params.commentId).select().single();
+    if (error) {
+      ({ data, error } = await supabase.from('comments')
+        .update({ content: content.trim() }).eq('id', req.params.commentId).select().single());
+    }
+    if (error) throw error;
+    res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
