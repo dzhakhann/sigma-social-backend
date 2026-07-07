@@ -807,7 +807,8 @@ app.get('/api/posts/following', async (req, res) => {
     const { data: follows } = await supabase.from('follows').select('following_id').eq('follower_id', userId);
     const ids = (follows || []).map(f => f.following_id);
     ids.push(userId); // include the user's own posts in their feed
-    const { data: posts, error } = await supabase.from('posts').select('*').in('user_id', ids).order('created_at', { ascending: false });
+    // Reposts never appear in the feed — only in profiles + as a notification.
+    const { data: posts, error } = await supabase.from('posts').select('*').in('user_id', ids).is('repost_of', null).order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
       const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
@@ -827,6 +828,7 @@ app.get('/api/posts/trending', async (req, res) => {
     const { data: posts, error } = await supabase
       .from('posts')
       .select('*')
+      .is('repost_of', null)
       .gte('created_at', since)
       .order('likes_count', { ascending: false })
       .limit(20);
@@ -847,7 +849,8 @@ app.get('/api/posts/trending', async (req, res) => {
 app.get('/api/posts', async (req, res) => {
   const { userId } = req.query;
   try {
-    const { data: posts, error } = await supabase.from('posts').select('*').order('created_at', { ascending: false });
+    // Main feed excludes reposts (they only live on profiles + notifications).
+    const { data: posts, error } = await supabase.from('posts').select('*').is('repost_of', null).order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
       const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
@@ -860,6 +863,75 @@ app.get('/api/posts', async (req, res) => {
       return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked, comments_count: comments?.length || 0 };
     }));
     res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// A single user's posts INCLUDING their reposts — used by the profile.
+app.get('/api/users/:userId/posts', async (req, res) => {
+  const targetId = req.params.userId;
+  const { userId } = req.query; // viewer (for is_liked)
+  try {
+    const { data: posts, error } = await supabase.from('posts').select('*').eq('user_id', targetId).order('created_at', { ascending: false });
+    if (error) throw error;
+    const enriched = await Promise.all(posts.map(async (post) => {
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
+      let isLiked = false;
+      if (userId) {
+        const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
+        isLiked = !!(like && like.length > 0);
+      }
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked, comments_count: comments?.length || 0 };
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// A single post by id (enriched) — used when opening a post from a notification.
+app.get('/api/posts/:postId', async (req, res) => {
+  const { userId } = req.query;
+  try {
+    const { data: rows, error } = await supabase.from('posts').select('*').eq('id', req.params.postId).limit(1);
+    if (error) throw error;
+    const post = rows && rows[0];
+    if (!post) return res.json({ success: false, error: 'Not found' });
+    const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+    const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
+    let isLiked = false;
+    if (userId) {
+      const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
+      isLiked = !!(like && like.length > 0);
+    }
+    res.json({ success: true, data: { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked, comments_count: comments?.length || 0 } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Repost: creates a repost row (denormalized) + notifies the reposter's followers.
+app.post('/api/posts/:postId/repost', authRequired, async (req, res) => {
+  const reposter = req.userId;
+  const origId = req.params.postId;
+  try {
+    const { data: rows } = await supabase.from('posts').select('*').eq('id', origId).limit(1);
+    const orig = rows && rows[0];
+    if (!orig) return res.json({ success: false, error: 'Post not found' });
+    const { data: origUser } = await supabase.from('users').select('username').eq('id', orig.user_id);
+    const origName = origUser?.[0]?.username || 'user';
+    const { data: created, error } = await supabase.from('posts').insert([{
+      user_id: reposter,
+      content: orig.content || '',
+      image_url: orig.image_url || null,
+      repost_of: origId,
+      repost_username: origName,
+      likes_count: 0,
+    }]).select().single();
+    if (error) throw error;
+    // Notify all followers of the reposter.
+    const { data: me } = await supabase.from('users').select('username').eq('id', reposter);
+    const myName = me?.[0]?.username || 'Someone';
+    const { data: followers } = await supabase.from('follows').select('follower_id').eq('following_id', reposter);
+    await Promise.all((followers || []).map((f) =>
+      createNotification(f.follower_id, reposter, 'repost', `${myName} сделал репост`, origId)));
+    res.json({ success: true, data: created });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
