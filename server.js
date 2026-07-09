@@ -754,6 +754,41 @@ app.get('/api/ai/recommend', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Zodiac sign from a birthday string (supports DD.MM.YYYY and YYYY-MM-DD).
+function zodiacFromBirthday(bd) {
+  if (!bd) return null;
+  const s = String(bd).trim();
+  let d, m;
+  const iso = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  const dm = s.match(/^(\d{1,2})[.\/-](\d{1,2})/);
+  if (iso) { m = +iso[2]; d = +iso[3]; }
+  else if (dm) { d = +dm[1]; m = +dm[2]; }
+  if (!d || !m || m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const z = [
+    ['Козерог','♑'],['Водолей','♒'],['Рыбы','♓'],['Овен','♈'],['Телец','♉'],
+    ['Близнецы','♊'],['Рак','♋'],['Лев','♌'],['Дева','♍'],['Весы','♎'],
+    ['Скорпион','♏'],['Стрелец','♐'],['Козерог','♑'],
+  ];
+  const cutoff = [19,18,20,19,20,20,22,22,21,22,21,21]; // last day of prev sign, per month
+  const idx = d <= cutoff[m - 1] ? m - 1 : m;
+  return { name: z[idx][0], emoji: z[idx][1] };
+}
+
+app.get('/api/ai/horoscope', authRequired, async (req, res) => {
+  try {
+    const { data } = await supabase.from('users').select('birthday').eq('id', req.userId);
+    const sign = zodiacFromBirthday(data?.[0]?.birthday);
+    if (!sign) return res.json({ success: true, sign: null, emoji: null, text: '' });
+    const system = 'Ты — добрый астролог Sigmacta. Дай короткий тёплый позитивный прогноз ' +
+      'на эту неделю для знака ' + sign.name + ' и один интересный факт про этот знак. ' +
+      'По-русски, без markdown и звёздочек, 3-4 предложения.';
+    const reply = await callGemini(system, [
+      { role: 'user', text: `Знак: ${sign.name}. Прогноз на неделю и факт.` },
+    ]);
+    res.json({ success: true, sign: sign.name, emoji: sign.emoji, text: reply || '' });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── GIF SEARCH (Giphy proxy — key stays on the server) ───────────────────────
 // Tenor was shut down by Google on 2026-06-30, so we use Giphy instead.
 const GIPHY_KEY = process.env.GIPHY_API_KEY || '';
