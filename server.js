@@ -797,6 +797,64 @@ app.get('/api/link-preview', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── PODCASTS (proxy iTunes search + RSS parse; nothing stored) ───────────────
+app.get('/api/podcast/search', async (req, res) => {
+  const term = (req.query.term || 'подкаст').toString();
+  try {
+    const url = `https://itunes.apple.com/search?media=podcast&limit=40&term=${encodeURIComponent(term)}`;
+    const r = await fetch(url);
+    const j = await r.json();
+    const data = (j.results || [])
+      .map((x) => ({
+        title: x.collectionName || x.trackName || 'Подкаст',
+        artist: x.artistName || '',
+        artwork: x.artworkUrl600 || x.artworkUrl100 || '',
+        feedUrl: x.feedUrl || '',
+        genre: x.primaryGenreName || '',
+      }))
+      .filter((p) => p.feedUrl);
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/podcast/episodes', async (req, res) => {
+  const feed = (req.query.feed || '').toString();
+  if (!/^https?:\/\//.test(feed)) return res.json({ success: false, error: 'bad feed' });
+  try {
+    const r = await fetch(feed, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SigmactaBot/1.0)' },
+      redirect: 'follow',
+    });
+    const xml = await r.text();
+    const strip = (s) => (s || '')
+      .replace(/<!\[CDATA\[|\]\]>/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+      .replace(/&#0?39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .trim();
+    const tag = (block, name) => {
+      const m = block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`, 'i'));
+      return m ? strip(m[1]) : '';
+    };
+    const items = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
+    const data = [];
+    for (const block of items) {
+      let audio = (block.match(/<enclosure[^>]*url="([^"]+)"/i) || [])[1]
+        || (block.match(/<media:content[^>]*url="([^"]+)"/i) || [])[1];
+      if (!audio) continue;
+      audio = audio.replace(/&amp;/g, '&');
+      data.push({
+        title: tag(block, 'title'),
+        audio,
+        date: tag(block, 'pubDate'),
+        duration: tag(block, 'itunes:duration'),
+      });
+      if (data.length >= 80) break;
+    }
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
 // Following feed

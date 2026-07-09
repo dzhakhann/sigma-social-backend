@@ -1,52 +1,72 @@
-# 🔥 SIGMA SOCIAL NETWORK
+# Sigmacta — Backend
 
-Production-ready backend for Sigma Social Network.
+Бэкенд социальной сети **Sigmacta**: REST API + realtime-чат для мобильного приложения на Flutter.
 
-## Quick Start
+> 📱 Мобильный клиент: [sigma-social-app](https://github.com/dzhakhann/sigma-social-app)
+
+---
+
+## 🛠 Стек
+
+- **Node.js + Express** (ESM)
+- **Supabase** — PostgreSQL + Storage
+- **Socket.IO** — сообщения в реальном времени
+- **JWT** (HS256) — авторизация · **bcrypt** — хеширование паролей
+- **express-rate-limit** — защита от перебора · **zod** — валидация
+- **Google Gemini** — ИИ-коуч и рекомендации
+
+---
+
+## 🔐 Безопасность
+
+- Пароли хранятся только как **bcrypt-хеши** (с миграцией легаси-паролей).
+- Все изменяющие эндпоинты защищены **JWT** (`authRequired`), приватные данные проверяются по `userId`.
+- **Rate-limiting**, ограничение размера загрузок, CORS из переменных окружения.
+- `service_role`-ключ Supabase живёт только на сервере и никогда не уходит клиенту.
+- Восстановление аккаунта — по **seed-фразе** (в стиле крипто-кошельков).
+
+---
+
+## 📡 Основные группы API
+
+| Область | Эндпоинты (примеры) |
+|--------|----------------------|
+| Авторизация | `POST /api/register`, `POST /api/login`, `POST /api/recover` |
+| Профиль | `GET /api/users/:id`, `PUT /api/users/:id`, `POST /api/follow` |
+| Лента и посты | `GET /api/posts`, `GET /api/posts/following`, `POST /api/posts`, `POST /api/posts/:id/repost` |
+| Комментарии/лайки | `GET/POST /api/posts/:id/comments`, `POST /api/posts/:id/like` |
+| Сторис | `GET /api/stories`, `POST /api/stories` |
+| Уведомления | `GET /api/notifications`, `POST /api/notifications/:id/read` |
+| Чат (Socket.IO) | `GET /api/chats`, `GET /api/messages/:chatId` + realtime-сокеты |
+| Цели / Wrapped | `GET/POST /api/goals`, `GET /api/goals/wrapped` |
+| ИИ | `POST /api/ai/chat`, `POST /api/ai/recommend` |
+
+---
+
+## 🚀 Запуск
 
 ```bash
-# Install dependencies
 npm install
-
-# Create .env file and fill in your Supabase credentials
-cp .env.example .env
-
-# Run in development mode
-npm run dev
-
-# Build for production
-npm run build
-
-# Start production server
-npm start
+npm start        # node server.js
 ```
 
-## API Documentation
+### Переменные окружения (`.env`)
 
-### Auth
-- `POST /api/auth/register` - Register new user
-- `POST /api/auth/login` - Login user
+```
+SUPABASE_URL=...
+SUPABASE_SERVICE_ROLE_KEY=...
+JWT_SECRET=...
+GEMINI_API_KEY=...
+GIPHY_API_KEY=...
+ALLOWED_ORIGINS=...
+```
 
-### Posts
-- `GET /api/posts` - Get feed
-- `POST /api/posts` - Create post
-- `POST /api/posts/:postId/like` - Like post
+> `.env` в репозиторий не коммитится (см. `.gitignore`). Секреты хранятся в переменных окружения хостинга.
 
-### Chats
-- `GET /api/chats` - Get user chats
-- `POST /api/chats/get-or-create` - Get or create chat
-- `GET /api/messages/:chatId` - Get messages
+Деплой: **Render** (auto-deploy при пуше в `main`).
 
-### Health
-- `GET /api/health` - Server health check
+---
 
-## WebSocket Events
+## 👤 Автор
 
-- `user_connect` - Register user
-- `send_message` - Send message
-- `send_haptic` - Send haptic
-- `chess_move` - Make chess move
-
-## License
-
-MIT
+**Jaxangir** — архитектура, API, база данных, интеграции.
