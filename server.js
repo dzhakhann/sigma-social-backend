@@ -1282,6 +1282,13 @@ app.get('/api/messages/:chatId', authRequired, async (req, res) => {
     if (chat[0].user1_id !== req.userId && chat[0].user2_id !== req.userId) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
+    // Opening the chat = reading the other person's messages (Telegram ✓✓).
+    await supabase.from('messages')
+      .update({ is_read: true })
+      .eq('chat_id', req.params.chatId)
+      .neq('sender_id', req.userId)
+      .eq('is_read', false);
+    io.emit('messages_read', { chatId: req.params.chatId, reader: req.userId });
     const { data, error } = await supabase.from('messages').select('*').eq('chat_id', req.params.chatId).order('created_at', { ascending: true });
     if (error) throw error;
     res.json({ success: true, data: data || [] });
