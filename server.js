@@ -225,6 +225,9 @@ function authRequired(req, res, next) {
     return res.status(401).json({ success: false, error: 'Not authenticated' });
   }
   req.userId = payload.sub;
+  // Refresh presence (fire-and-forget) so we can show "в сети / был недавно".
+  supabase.from('users').update({ last_seen: new Date().toISOString() })
+    .eq('id', payload.sub).then(() => {}, () => {});
   next();
 }
 
