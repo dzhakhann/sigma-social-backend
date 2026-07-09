@@ -651,7 +651,13 @@ async function callGemini(system, messages) {
   const body = {
     contents,
     ...(system ? { systemInstruction: { parts: [{ text: system }] } } : {}),
-    generationConfig: { temperature: 0.8, maxOutputTokens: 800 },
+    // thinkingBudget:0 stops gemini-2.5-flash from spending the token budget on
+    // hidden "thinking" (which was truncating the visible answer).
+    generationConfig: {
+      temperature: 0.8,
+      maxOutputTokens: 1024,
+      thinkingConfig: { thinkingBudget: 0 },
+    },
   };
   const r = await fetch(`${GEMINI_URL}?key=${GEMINI_KEY}`, {
     method: 'POST',
@@ -731,9 +737,10 @@ app.get('/api/ai/recommend', authRequired, async (req, res) => {
     const goalsText = list.map((g) =>
       `- ${g.title} (${g.category}, ${g.progress}%${g.status === 'done' ? ', выполнено' : ''})`).join('\n');
     const system =
-      'Ты — персональный коуч Sigmacta. На основе целей пользователя дай 3 коротких ' +
-      'конкретных совета, что сделать на этой неделе и что улучшить (привычки, сон, ' +
-      'питание, фокус), чтобы двигаться к целям. Пиши тепло, по-русски, буллетами, без воды. Максимум 4 строки.';
+      'Ты — персональный коуч Sigmacta. На основе целей пользователя дай ровно 3 ' +
+      'конкретных совета на эту неделю — что сделать, чтобы двигаться к целям. ' +
+      'Каждый совет — одно короткое законченное предложение с новой строки, начинай с "- ". ' +
+      'Без приветствий, без вступления, без markdown и без звёздочек. По-русски.';
     const reply = await callGemini(system, [
       { role: 'user', text: `Мои цели на год:\n${goalsText}\n\nДай рекомендации.` },
     ]);
