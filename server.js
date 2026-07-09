@@ -70,6 +70,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
   alter table users add column if not exists skills text;          -- languages, subjects, sports, hobbies
   alter table users add column if not exists hidden_fields jsonb default '[]'::jsonb; -- privacy: field keys the user hides
   alter table users add column if not exists is_pro boolean default false;           -- Sigmacta Pro subscription
+  alter table users add column if not exists last_seen timestamptz;                   -- online/last-seen presence
+  alter table users add column if not exists aura integer default 0;                  -- Aura activity score
+  alter table users add column if not exists aura_day date;                           -- daily-login throttle for Aura
+  alter table messages add column if not exists is_read boolean default false;        -- read receipts
   alter table comments add column if not exists is_edited boolean default false;      -- comment editing
 
   -- Yearly goals (Sigmacta MVP): each user's goals for a given year.
@@ -155,6 +159,30 @@ async function createNotification(userId, fromUserId, type, message, postId = nu
       user_id: userId, from_user_id: fromUserId,
       type, message, post_id: postId, is_read: false
     }]);
+  } catch (_) {}
+}
+
+// ─── AURA: user activity score (gamification). Small increments per action. ────
+async function awardAura(userId, amount) {
+  if (!userId || !amount) return;
+  try {
+    const { data } = await supabase.from('users').select('aura').eq('id', userId);
+    const cur = Number(data?.[0]?.aura || 0);
+    await supabase.from('users').update({ aura: cur + amount }).eq('id', userId);
+  } catch (_) {}
+}
+
+// Daily login bonus (once per calendar day), throttled via aura_day.
+async function awardDailyAura(userId) {
+  if (!userId) return;
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const { data } = await supabase.from('users').select('aura_day, aura').eq('id', userId);
+    if (data?.[0]?.aura_day === today) return;
+    await supabase.from('users').update({
+      aura_day: today,
+      aura: Number(data?.[0]?.aura || 0) + 5,
+    }).eq('id', userId);
   } catch (_) {}
 }
 
@@ -330,6 +358,7 @@ app.post('/api/auth/login', async (req, res) => {
       });
     }
     const token = signToken({ sub: user.id, username: user.username });
+    awardDailyAura(user.id); // +5 Aura for logging in today
     res.json({ success: true, data: { user, token } });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -412,9 +441,17 @@ app.get('/api/users/:userId', async (req, res) => {
     const year = new Date().getFullYear();
     const { count: goalsCount } = await supabase.from('goals')
       .select('*', { count: 'exact', head: true }).eq('user_id', user.id).eq('year', year);
+    const { count: goalsDone } = await supabase.from('goals')
+      .select('*', { count: 'exact', head: true })
+      .eq('user_id', user.id).eq('year', year).eq('status', 'done');
     res.json({
       success: true,
-      data: { ...user, posts_count: postsCount || 0, goals_count: goalsCount || 0 },
+      data: {
+        ...user,
+        posts_count: postsCount || 0,
+        goals_count: goalsCount || 0,
+        goals_done_count: goalsDone || 0,
+      },
     });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -466,6 +503,7 @@ app.post('/api/users/:userId/follow/:targetUserId', authRequired, async (req, re
     if (target) await supabase.from('users').update({ followers_count: (target[0].followers_count || 0) + 1 }).eq('id', targetUserId);
     if (current) await supabase.from('users').update({ following_count: (current[0].following_count || 0) + 1 }).eq('id', userId);
     await createNotification(targetUserId, userId, 'follow', `${current?.[0]?.username || 'Someone'} started following you`);
+    awardAura(targetUserId, 5); // gaining a follower
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -577,8 +615,9 @@ app.post('/api/goals', authRequired, async (req, res) => {
 app.post('/api/goals/:id/update', authRequired, async (req, res) => {
   const { title, category, note, progress, status } = req.body;
   try {
-    const { data: g } = await supabase.from('goals').select('user_id').eq('id', req.params.id).single();
+    const { data: g } = await supabase.from('goals').select('user_id, status').eq('id', req.params.id).single();
     if (!g || g.user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    const wasDone = g.status === 'done';
     const update = {};
     if (title !== undefined) update.title = title;
     if (category !== undefined) update.category = category;
@@ -595,6 +634,7 @@ app.post('/api/goals/:id/update', authRequired, async (req, res) => {
     }
     const { data, error } = await supabase.from('goals').update(update).eq('id', req.params.id).select().single();
     if (error) throw error;
+    if (!wasDone && update.status === 'done') awardAura(req.userId, 50); // completing a goal
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -1044,6 +1084,7 @@ app.post('/api/posts', authRequired, async (req, res) => {
   try {
     const { data, error } = await supabase.from('posts').insert([{ user_id, content: content || '', image_url: image_url || null, likes_count: 0 }]).select().single();
     if (error) throw error;
+    awardAura(user_id, 10); // publishing a post
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -1082,6 +1123,7 @@ app.post('/api/posts/:postId/like', authRequired, async (req, res) => {
     await supabase.from('posts').update({ likes_count: newCount }).eq('id', postId);
     const { data: liker } = await supabase.from('users').select('username').eq('id', user_id);
     await createNotification(post[0].user_id, user_id, 'like', `${liker?.[0]?.username || 'Someone'} liked your post`, postId);
+    awardAura(post[0].user_id, 2); // receiving a like
     res.json({ success: true, liked: true, likes_count: newCount });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -1107,6 +1149,7 @@ app.post('/api/posts/:postId/comments', authRequired, async (req, res) => {
   try {
     const { data, error } = await supabase.from('comments').insert([{ post_id: postId, user_id, content }]).select().single();
     if (error) throw error;
+    awardAura(user_id, 3); // writing a comment
     const { data: post } = await supabase.from('posts').select('user_id').eq('id', postId);
     const { data: commenter } = await supabase.from('users').select('username').eq('id', user_id);
     if (post?.[0]) {
