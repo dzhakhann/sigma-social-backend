@@ -755,10 +755,16 @@ app.post('/api/ai/chat', authRequired, async (req, res) => {
       `Цели на ${year}:\n${goalsText}\n` +
       'Помогай ставить и достигать личные цели, мотивируй, давай конкретные шаги. ' +
       'Обращайся по имени, если оно известно. Отвечай коротко, тепло, на языке пользователя.';
-    const reply = await callGemini(system, req.body.messages);
+    const lang = req.body.lang === 'ru' ? 'ru' : 'en';
+    const langRule = lang === 'ru'
+      ? ' Отвечай ТОЛЬКО по-русски.'
+      : ' Reply ONLY in English.';
+    const reply = await callGemini(system + langRule, req.body.messages);
     res.json({
       success: true,
-      reply: reply || 'ИИ временно недоступен. Попробуй чуть позже.',
+      reply: reply || (lang === 'ru'
+        ? 'ИИ временно недоступен. Попробуй чуть позже.'
+        : 'AI is temporarily unavailable. Try again later.'),
     });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -767,6 +773,7 @@ app.post('/api/ai/chat', authRequired, async (req, res) => {
 app.get('/api/ai/recommend', authRequired, async (req, res) => {
   try {
     const uid = req.userId;
+    const lang = req.query.lang === 'ru' ? 'ru' : 'en';
     const year = new Date().getFullYear();
     const { data: goals } = await supabase.from('goals')
       .select('title, category, progress, status').eq('user_id', uid).eq('year', year);
@@ -774,22 +781,32 @@ app.get('/api/ai/recommend', authRequired, async (req, res) => {
     if (list.length === 0) {
       return res.json({
         success: true,
-        text: 'Поставь первую цель на год — и я подскажу, с чего начать двигаться к ней.',
+        text: lang === 'ru'
+          ? 'Поставь первую цель на год — и я подскажу, с чего начать двигаться к ней.'
+          : 'Set your first yearly goal — and I\'ll suggest where to start.',
       });
     }
     const goalsText = list.map((g) =>
-      `- ${g.title} (${g.category}, ${g.progress}%${g.status === 'done' ? ', выполнено' : ''})`).join('\n');
-    const system =
-      'Ты — персональный коуч Sigmacta. На основе целей пользователя дай ровно 3 ' +
-      'конкретных совета на эту неделю — что сделать, чтобы двигаться к целям. ' +
-      'Каждый совет — одно короткое законченное предложение с новой строки, начинай с "- ". ' +
-      'Без приветствий, без вступления, без markdown и без звёздочек. По-русски.';
+      `- ${g.title} (${g.category}, ${g.progress}%${g.status === 'done' ? ', done' : ''})`).join('\n');
+    const system = lang === 'ru'
+      ? 'Ты — персональный коуч Sigmacta. На основе целей пользователя дай ровно 3 ' +
+        'конкретных совета на сегодня — что сделать, чтобы двигаться к целям. ' +
+        'Каждый совет — одно короткое законченное предложение с новой строки, начинай с "- ". ' +
+        'Без приветствий, без вступления, без markdown и без звёздочек. Отвечай ТОЛЬКО по-русски.'
+      : 'You are the personal coach of Sigmacta. Based on the user\'s goals, give exactly 3 ' +
+        'concrete tips for today — what to do to move toward the goals. ' +
+        'Each tip is one short complete sentence on a new line, starting with "- ". ' +
+        'No greetings, no intro, no markdown, no asterisks. Reply ONLY in English.';
     const reply = await callGemini(system, [
-      { role: 'user', text: `Мои цели на год:\n${goalsText}\n\nДай рекомендации.` },
+      { role: 'user', text: lang === 'ru'
+          ? `Мои цели на год:\n${goalsText}\n\nДай рекомендации.`
+          : `My goals for the year:\n${goalsText}\n\nGive recommendations.` },
     ]);
     res.json({
       success: true,
-      text: reply || 'Совет: выбери одну цель и сделай сегодня один маленький шаг к ней.',
+      text: reply || (lang === 'ru'
+        ? 'Совет: выбери одну цель и сделай сегодня один маленький шаг к ней.'
+        : 'Tip: pick one goal and take one small step toward it today.'),
     });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -805,27 +822,37 @@ function zodiacFromBirthday(bd) {
   else if (dm) { d = +dm[1]; m = +dm[2]; }
   if (!d || !m || m < 1 || m > 12 || d < 1 || d > 31) return null;
   const z = [
-    ['Козерог','♑'],['Водолей','♒'],['Рыбы','♓'],['Овен','♈'],['Телец','♉'],
-    ['Близнецы','♊'],['Рак','♋'],['Лев','♌'],['Дева','♍'],['Весы','♎'],
-    ['Скорпион','♏'],['Стрелец','♐'],['Козерог','♑'],
+    ['Козерог','♑','Capricorn'],['Водолей','♒','Aquarius'],['Рыбы','♓','Pisces'],
+    ['Овен','♈','Aries'],['Телец','♉','Taurus'],['Близнецы','♊','Gemini'],
+    ['Рак','♋','Cancer'],['Лев','♌','Leo'],['Дева','♍','Virgo'],
+    ['Весы','♎','Libra'],['Скорпион','♏','Scorpio'],['Стрелец','♐','Sagittarius'],
+    ['Козерог','♑','Capricorn'],
   ];
   const cutoff = [19,18,20,19,20,20,22,22,21,22,21,21]; // last day of prev sign, per month
   const idx = d <= cutoff[m - 1] ? m - 1 : m;
-  return { name: z[idx][0], emoji: z[idx][1] };
+  return { name: z[idx][0], emoji: z[idx][1], nameEn: z[idx][2] };
 }
 
 app.get('/api/ai/horoscope', authRequired, async (req, res) => {
   try {
+    const lang = req.query.lang === 'ru' ? 'ru' : 'en';
     const { data } = await supabase.from('users').select('birthday').eq('id', req.userId);
     const sign = zodiacFromBirthday(data?.[0]?.birthday);
     if (!sign) return res.json({ success: true, sign: null, emoji: null, text: '' });
-    const system = 'Ты — добрый астролог Sigmacta. Дай короткий тёплый позитивный прогноз ' +
-      'на эту неделю для знака ' + sign.name + ' и один интересный факт про этот знак. ' +
-      'По-русски, без markdown и звёздочек, 3-4 предложения.';
+    const signName = lang === 'ru' ? sign.name : (sign.nameEn || sign.name);
+    const system = lang === 'ru'
+      ? 'Ты — добрый астролог Sigmacta. Дай короткий тёплый позитивный прогноз ' +
+        'на эту неделю для знака ' + sign.name + ' и один интересный факт про этот знак. ' +
+        'Отвечай ТОЛЬКО по-русски, без markdown и звёздочек, 3-4 предложения.'
+      : 'You are the kind astrologer of Sigmacta. Give a short warm positive forecast ' +
+        'for this week for the sign ' + (sign.nameEn || sign.name) + ' and one interesting fact about this sign. ' +
+        'Reply ONLY in English, no markdown or asterisks, 3-4 sentences.';
     const reply = await callGemini(system, [
-      { role: 'user', text: `Знак: ${sign.name}. Прогноз на неделю и факт.` },
+      { role: 'user', text: lang === 'ru'
+          ? `Знак: ${sign.name}. Прогноз на неделю и факт.`
+          : `Sign: ${signName}. Weekly forecast and a fact.` },
     ]);
-    res.json({ success: true, sign: sign.name, emoji: sign.emoji, text: reply || '' });
+    res.json({ success: true, sign: signName, emoji: sign.emoji, text: reply || '' });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
