@@ -934,8 +934,12 @@ app.get('/api/podcast/search', async (req, res) => {
 // episodes screen (RSS parser) plays the chapters.
 app.get('/api/audiobooks/search', async (req, res) => {
   const term = (req.query.term || '').toString().trim();
+  const genre = (req.query.genre || '').toString().trim();
+  const language = (req.query.language || '').toString().trim();
   try {
-    const base = 'https://librivox.org/api/feed/audiobooks/?format=json&extended=1&limit=40';
+    let base = 'https://librivox.org/api/feed/audiobooks/?format=json&extended=1&limit=40';
+    if (genre) base += `&genre=${encodeURIComponent(genre)}`;
+    if (language) base += `&language=${encodeURIComponent(language)}`;
     const url = term
       ? `${base}&title=${encodeURIComponent(term)}`
       : `${base}&sort_order=id`;
