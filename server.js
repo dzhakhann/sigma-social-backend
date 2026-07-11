@@ -1473,25 +1473,39 @@ app.get('/api/admin/users', authRequired, adminOnly, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Remove a user and all dependent rows (some tables lack ON DELETE CASCADE).
+async function deleteUserCascade(id) {
+  await supabase.from('messages').delete().eq('sender_id', id);
+  await supabase.from('chats').delete().or(`user1_id.eq.${id},user2_id.eq.${id}`);
+  await supabase.from('follows').delete().or(`follower_id.eq.${id},following_id.eq.${id}`);
+  await supabase.from('likes').delete().eq('user_id', id);
+  await supabase.from('reel_likes').delete().eq('user_id', id);
+  await supabase.from('comments').delete().eq('user_id', id);
+  await supabase.from('stories').delete().eq('user_id', id);
+  await supabase.from('reels').delete().eq('user_id', id);
+  await supabase.from('posts').delete().eq('user_id', id);
+  await supabase.from('goals').delete().eq('user_id', id);
+  await supabase.from('notifications').delete().or(`user_id.eq.${id},from_user_id.eq.${id}`);
+  const { error } = await supabase.from('users').delete().eq('id', id);
+  if (error) throw error;
+}
+
 app.delete('/api/admin/users/:id', authRequired, adminOnly, async (req, res) => {
   const id = req.params.id;
   try {
     if (id === req.userId) {
       return res.json({ success: false, error: 'You cannot delete your own admin account' });
     }
-    // Remove dependent rows first (some tables lack ON DELETE CASCADE).
-    await supabase.from('messages').delete().eq('sender_id', id);
-    await supabase.from('chats').delete().or(`user1_id.eq.${id},user2_id.eq.${id}`);
-    await supabase.from('follows').delete().or(`follower_id.eq.${id},following_id.eq.${id}`);
-    await supabase.from('likes').delete().eq('user_id', id);
-    await supabase.from('reel_likes').delete().eq('user_id', id);
-    await supabase.from('comments').delete().eq('user_id', id);
-    await supabase.from('stories').delete().eq('user_id', id);
-    await supabase.from('reels').delete().eq('user_id', id);
-    await supabase.from('posts').delete().eq('user_id', id);
-    await supabase.from('notifications').delete().or(`user_id.eq.${id},from_user_id.eq.${id}`);
-    const { error } = await supabase.from('users').delete().eq('id', id);
-    if (error) throw error;
+    await deleteUserCascade(id);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Self-service account deletion (required by Google Play for apps with
+// account creation). Deletes the caller's account and all their content.
+app.delete('/api/account', authRequired, async (req, res) => {
+  try {
+    await deleteUserCascade(req.userId);
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
