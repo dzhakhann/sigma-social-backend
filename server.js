@@ -1356,6 +1356,91 @@ app.get('/api/stories/:id/stats', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── HOME FEED: friends activity (last events from people you follow) ────────
+app.get('/api/feed/activity', authRequired, async (req, res) => {
+  try {
+    const { data: follows } = await supabase.from('follows')
+      .select('following_id').eq('follower_id', req.userId).limit(50);
+    const ids = (follows || []).map((f) => f.following_id);
+    if (ids.length === 0) return res.json({ success: true, data: [] });
+    const [posts, stories] = await Promise.all([
+      supabase.from('posts').select('user_id, created_at')
+        .in('user_id', ids).order('created_at', { ascending: false }).limit(6),
+      supabase.from('stories').select('user_id, created_at')
+        .in('user_id', ids).order('created_at', { ascending: false }).limit(6),
+    ]);
+    const events = [
+      ...((posts.data || []).map((p) => ({ ...p, type: 'post' }))),
+      ...((stories.data || []).map((s) => ({ ...s, type: 'story' }))),
+    ].sort((a, b) => new Date(b.created_at) - new Date(a.created_at)).slice(0, 8);
+    const uids = [...new Set(events.map((e) => e.user_id))];
+    const { data: users } = await supabase.from('users')
+      .select('id, username, avatar_url').in('id', uids);
+    const byId = Object.fromEntries((users || []).map((u) => [u.id, u]));
+    res.json({
+      success: true,
+      data: events.map((e) => ({
+        type: e.type,
+        created_at: e.created_at,
+        username: byId[e.user_id]?.username || '',
+        avatar_url: byId[e.user_id]?.avatar_url || null,
+      })),
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── WEEKLY AI PLAN ("Неделя для тебя" — cached client-side per week) ────────
+app.get('/api/ai/week', authRequired, async (req, res) => {
+  const lang = req.query.lang === 'ru' ? 'ru' : 'en';
+  try {
+    const year = new Date().getFullYear();
+    const { data: goals } = await supabase.from('goals')
+      .select('title, category, progress, status')
+      .eq('user_id', req.userId).eq('year', year);
+    const list = goals || [];
+    const goalsText = list.length
+      ? list.map((g) => `- ${g.title} (${g.progress}%${g.status === 'done' ? ', done' : ''})`).join('\n')
+      : (lang === 'ru' ? 'нет целей' : 'no goals');
+    const system = lang === 'ru'
+      ? 'Ты — коуч Sigmacta. Составь короткий персональный план на эту неделю: ' +
+        '1) главная цель недели, 2) челлендж недели, 3) полезная привычка, 4) короткий мотивирующий совет. ' +
+        'Каждый пункт с новой строки, начинай с "- ". Без markdown и звёздочек. Максимум 4 строки. Отвечай ТОЛЬКО по-русски.'
+      : 'You are the Sigmacta coach. Build a short personal plan for this week: ' +
+        '1) main goal of the week, 2) weekly challenge, 3) useful habit, 4) short motivating tip. ' +
+        'Each item on a new line starting with "- ". No markdown or asterisks. Max 4 lines. Reply ONLY in English.';
+    const reply = await callGemini(system, [
+      { role: 'user', text: lang === 'ru'
+          ? `Мои цели:\n${goalsText}\n\nСоставь план недели.`
+          : `My goals:\n${goalsText}\n\nBuild my weekly plan.` },
+    ]);
+    res.json({
+      success: true,
+      text: reply || (lang === 'ru'
+        ? '- Выбери одну цель и продвинь её на 10% на этой неделе.\n- Челлендж: 3 дня подряд без пропуска.\n- Привычка: 10 минут в день на главное.\n- Маленькие шаги каждый день сильнее рывков.'
+        : '- Pick one goal and push it 10% forward this week.\n- Challenge: 3 days in a row without skipping.\n- Habit: 10 focused minutes a day.\n- Small daily steps beat big bursts.'),
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── DAILY REWARD (+5 Aura, once per day; needs users.last_daily column) ─────
+app.post('/api/daily-reward', authRequired, async (req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const { data } = await supabase.from('users')
+      .select('aura, last_daily').eq('id', req.userId);
+    const u = data?.[0];
+    if (!u) return res.json({ success: false, error: 'User not found' });
+    if ((u.last_daily || '').toString().slice(0, 10) === today) {
+      return res.json({ success: true, claimed: false, aura: u.aura || 0 });
+    }
+    const newAura = (u.aura || 0) + 5;
+    const { error } = await supabase.from('users')
+      .update({ aura: newAura, last_daily: today }).eq('id', req.userId);
+    if (error) throw error;
+    res.json({ success: true, claimed: true, aura: newAura, bonus: 5 });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── PROFILE ANALYTICS ────────────────────────────────────────────────────────
 
 // Record a profile visit (unique per visitor).

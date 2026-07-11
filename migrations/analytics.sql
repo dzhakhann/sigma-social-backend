@@ -20,3 +20,6 @@ create table if not exists profile_views (
 
 create index if not exists idx_story_events_story on story_events (story_id);
 create index if not exists idx_profile_views_profile on profile_views (profile_id);
+
+-- Daily reward (+5 Aura once a day)
+alter table users add column if not exists last_daily date;
