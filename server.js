@@ -929,6 +929,35 @@ app.get('/api/podcast/search', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Audiobooks — LibriVox catalog (public domain, free for commercial apps).
+// Each book maps to the same "show" shape as podcasts, so the existing
+// episodes screen (RSS parser) plays the chapters.
+app.get('/api/audiobooks/search', async (req, res) => {
+  const term = (req.query.term || '').toString().trim();
+  try {
+    const base = 'https://librivox.org/api/feed/audiobooks/?format=json&extended=1&limit=40';
+    const url = term
+      ? `${base}&title=${encodeURIComponent(term)}`
+      : `${base}&sort_order=id`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Sigmacta/1.0' } });
+    const j = await r.json();
+    const data = (j.books || [])
+      .map((b) => ({
+        title: b.title || 'Audiobook',
+        artist: (b.authors || [])
+          .map((a) => `${a.first_name || ''} ${a.last_name || ''}`.trim())
+          .filter(Boolean)
+          .join(', '),
+        artwork: b.coverart_jpg || b.coverart_thumbnail || '',
+        feedUrl: b.url_rss || '',
+        genre: b.language || '',
+        duration: b.totaltime || '',
+      }))
+      .filter((b) => b.feedUrl);
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 app.get('/api/podcast/episodes', async (req, res) => {
   const feed = (req.query.feed || '').toString();
   if (!/^https?:\/\//.test(feed)) return res.json({ success: false, error: 'bad feed' });
