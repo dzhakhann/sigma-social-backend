@@ -1269,6 +1269,122 @@ app.get('/api/stories/user/:userId', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── STORY STATS (views / likes / replies — Instagram-style) ─────────────────
+// Requires the story_events + profile_views tables (see migrations/analytics.sql).
+
+async function recordStoryEvent(storyId, userId, type) {
+  try {
+    await supabase.from('story_events')
+      .upsert([{ story_id: storyId, user_id: userId, type }],
+        { onConflict: 'story_id,user_id,type', ignoreDuplicates: true });
+  } catch (_) {}
+}
+
+app.post('/api/stories/:id/view', authRequired, async (req, res) => {
+  await recordStoryEvent(req.params.id, req.userId, 'view');
+  res.json({ success: true });
+});
+app.post('/api/stories/:id/like-stat', authRequired, async (req, res) => {
+  await recordStoryEvent(req.params.id, req.userId, 'like');
+  res.json({ success: true });
+});
+app.post('/api/stories/:id/reply-stat', authRequired, async (req, res) => {
+  await recordStoryEvent(req.params.id, req.userId, 'reply');
+  res.json({ success: true });
+});
+
+// Full stats for one story — only its author can see them.
+app.get('/api/stories/:id/stats', authRequired, async (req, res) => {
+  try {
+    const { data: st } = await supabase.from('stories')
+      .select('user_id').eq('id', req.params.id);
+    if (!st?.[0] || st[0].user_id !== req.userId) {
+      return res.json({ success: false, error: 'Not your story' });
+    }
+    const { data: events } = await supabase.from('story_events')
+      .select('user_id, type').eq('story_id', req.params.id);
+    const byUser = {};
+    for (const ev of events || []) {
+      byUser[ev.user_id] = byUser[ev.user_id] || { view: false, like: false, reply: false };
+      byUser[ev.user_id][ev.type] = true;
+    }
+    const ids = Object.keys(byUser);
+    let viewers = [];
+    if (ids.length > 0) {
+      const { data: users } = await supabase.from('users')
+        .select('id, username, avatar_url').in('id', ids);
+      viewers = (users || []).map((u) => ({
+        id: u.id, username: u.username, avatar_url: u.avatar_url,
+        liked: byUser[u.id].like, replied: byUser[u.id].reply,
+      }));
+    }
+    const count = (t) => (events || []).filter((e) => e.type === t).length;
+    res.json({
+      success: true,
+      views: count('view'), likes: count('like'), replies: count('reply'),
+      viewers,
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── PROFILE ANALYTICS ────────────────────────────────────────────────────────
+
+// Record a profile visit (unique per visitor).
+app.post('/api/users/:id/visit', authRequired, async (req, res) => {
+  if (req.params.id !== req.userId) {
+    try {
+      await supabase.from('profile_views')
+        .upsert([{ profile_id: req.params.id, viewer_id: req.userId }],
+          { onConflict: 'profile_id,viewer_id', ignoreDuplicates: true });
+    } catch (_) {}
+  }
+  res.json({ success: true });
+});
+
+// Aggregated analytics for the current user's own profile.
+app.get('/api/me/analytics', authRequired, async (req, res) => {
+  const uid = req.userId;
+  try {
+    const { count: visits } = await supabase.from('profile_views')
+      .select('id', { count: 'exact', head: true }).eq('profile_id', uid);
+    const { data: posts } = await supabase.from('posts')
+      .select('id, likes_count').eq('user_id', uid);
+    const postIds = (posts || []).map((p) => p.id);
+    const postLikes = (posts || []).reduce((s, p) => s + (p.likes_count || 0), 0);
+    let comments = 0;
+    if (postIds.length > 0) {
+      const { count } = await supabase.from('comments')
+        .select('id', { count: 'exact', head: true }).in('post_id', postIds);
+      comments = count || 0;
+    }
+    const { data: stories } = await supabase.from('stories')
+      .select('id').eq('user_id', uid);
+    const storyIds = (stories || []).map((s) => s.id);
+    let storyViews = 0, storyLikes = 0;
+    if (storyIds.length > 0) {
+      const { count: v } = await supabase.from('story_events')
+        .select('id', { count: 'exact', head: true })
+        .in('story_id', storyIds).eq('type', 'view');
+      const { count: l } = await supabase.from('story_events')
+        .select('id', { count: 'exact', head: true })
+        .in('story_id', storyIds).eq('type', 'like');
+      storyViews = v || 0;
+      storyLikes = l || 0;
+    }
+    res.json({
+      success: true,
+      data: {
+        profile_visits: visits || 0,
+        post_likes: postLikes,
+        comments,
+        story_views: storyViews,
+        story_likes: storyLikes,
+        reach: postLikes + comments + storyViews + (visits || 0),
+      },
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── NOTIFICATIONS ────────────────────────────────────────────────────────────
 
 app.get('/api/notifications', authRequired, async (req, res) => {
