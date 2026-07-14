@@ -1000,6 +1000,72 @@ app.get('/api/podcast/episodes', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── NEWS (Google News RSS proxy — headlines + link to source, à la Google
+// Discover). We never store news; only proxy/parse and return metadata. This
+// is the legal "headline + attribution + link" model, safe for commercial use.
+const NEWS_TOPICS = {
+  world: { en: 'World', ru: 'Мир' },
+  politics: { en: 'Politics', ru: 'Политика' },
+  economy: { en: 'Business', ru: 'Экономика' },
+  tech: { en: 'Technology', ru: 'Технологии' },
+  ai: { en: 'Artificial Intelligence', ru: 'Искусственный интеллект' },
+  science: { en: 'Science', ru: 'Наука' },
+  auto: { en: 'Cars', ru: 'Автомобили' },
+  football: { en: 'Football', ru: 'Футбол' },
+  sport: { en: 'Sports', ru: 'Спорт' },
+  show: { en: 'Entertainment', ru: 'Шоу-бизнес' },
+  games: { en: 'Video games', ru: 'Игры' },
+  movies: { en: 'Movies', ru: 'Кино' },
+  music: { en: 'Music', ru: 'Музыка' },
+};
+
+app.get('/api/news', async (req, res) => {
+  const cat = (req.query.cat || 'world').toString();
+  const lang = req.query.lang === 'ru' ? 'ru' : 'en';
+  const hl = lang === 'ru' ? 'ru' : 'en-US';
+  const gl = lang === 'ru' ? 'RU' : 'US';
+  const topic = NEWS_TOPICS[cat] || NEWS_TOPICS.world;
+  const query = encodeURIComponent(topic[lang]);
+  try {
+    const url =
+      `https://news.google.com/rss/search?q=${query}&hl=${hl}&gl=${gl}&ceid=${gl}:${lang}`;
+    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Sigmacta' } });
+    const xml = await r.text();
+    const strip = (s) => (s || '')
+      .replace(/<!\[CDATA\[|\]\]>/g, '')
+      .replace(/<[^>]+>/g, '')
+      .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+      .replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+      .trim();
+    const tag = (block, name) => {
+      const m = block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`, 'i'));
+      return m ? strip(m[1]) : '';
+    };
+    const items = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
+    const data = [];
+    for (const block of items) {
+      const rawTitle = tag(block, 'title');
+      const source = tag(block, 'source') ||
+        (rawTitle.includes(' - ') ? rawTitle.split(' - ').pop() : '');
+      const title = source && rawTitle.endsWith(' - ' + source)
+        ? rawTitle.slice(0, -(source.length + 3)).trim()
+        : rawTitle;
+      const link = tag(block, 'link');
+      if (!title || !link) continue;
+      data.push({
+        title,
+        source,
+        link,
+        date: tag(block, 'pubDate'),
+        category: cat,
+      });
+      if (data.length >= 20) break;
+    }
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
 // Following feed
