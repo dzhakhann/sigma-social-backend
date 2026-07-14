@@ -1000,6 +1000,90 @@ app.get('/api/podcast/episodes', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── REPORTS · BLOCK · HIDE · VERIFICATION ───────────────────────────────────
+// Requires the moderation tables (see migrations/moderation.sql).
+
+// Submit a report on any object (user / post / comment / story).
+app.post('/api/reports', authRequired, async (req, res) => {
+  try {
+    const { target_type, target_id, reason, note, link } = req.body || {};
+    if (!target_type || !target_id) {
+      return res.json({ success: false, error: 'Missing target' });
+    }
+    await supabase.from('reports').insert([{
+      reporter_id: req.userId,
+      target_type, target_id,
+      reason: reason || 'other',
+      note: note || '',
+      link: link || '',
+      status: 'open',
+    }]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Block / unblock a user (mutual invisibility + no messaging).
+app.post('/api/block/:id', authRequired, async (req, res) => {
+  try {
+    await supabase.from('blocks').upsert([
+      { user_id: req.userId, blocked_id: req.params.id },
+    ], { onConflict: 'user_id,blocked_id', ignoreDuplicates: true });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+app.delete('/api/block/:id', authRequired, async (req, res) => {
+  try {
+    await supabase.from('blocks').delete()
+      .eq('user_id', req.userId).eq('blocked_id', req.params.id);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Hide a user's content from my feed (soft, one-directional).
+app.post('/api/hide/:id', authRequired, async (req, res) => {
+  try {
+    await supabase.from('hidden_users').upsert([
+      { user_id: req.userId, hidden_id: req.params.id },
+    ], { onConflict: 'user_id,hidden_id', ignoreDuplicates: true });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Am I blocked by / did I block this user? (for profile visibility gate)
+app.get('/api/block/status/:id', authRequired, async (req, res) => {
+  try {
+    const { data } = await supabase.from('blocks')
+      .select('user_id, blocked_id')
+      .or(`and(user_id.eq.${req.userId},blocked_id.eq.${req.params.id}),and(user_id.eq.${req.params.id},blocked_id.eq.${req.userId})`);
+    const iBlocked = (data || []).some((b) => b.user_id === req.userId);
+    const blockedMe = (data || []).some((b) => b.blocked_id === req.userId);
+    res.json({ success: true, i_blocked: iBlocked, blocked_me: blockedMe });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Verification (blue check) application — once per 365 days.
+app.post('/api/verification', authRequired, async (req, res) => {
+  try {
+    const { email, wiki, info } = req.body || {};
+    const { data: last } = await supabase.from('verification_requests')
+      .select('created_at').eq('user_id', req.userId)
+      .order('created_at', { ascending: false }).limit(1);
+    if (last?.[0]) {
+      const days = (Date.now() - new Date(last[0].created_at)) / 86400000;
+      if (days < 365) {
+        return res.json({ success: false, error: 'already_applied',
+          days_left: Math.ceil(365 - days) });
+      }
+    }
+    await supabase.from('verification_requests').insert([{
+      user_id: req.userId,
+      email: email || '', wiki: wiki || '', info: info || '',
+      status: 'pending',
+    }]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── NEWS (Google News RSS proxy — headlines + link to source, à la Google
 // Discover). We never store news; only proxy/parse and return metadata. This
 // is the legal "headline + attribution + link" model, safe for commercial use.
