@@ -429,6 +429,16 @@ app.get('/api/users', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Resolve a username → user id (for deep links sigmacta.app/@username).
+app.get('/api/users/by-username/:username', async (req, res) => {
+  try {
+    const { data } = await supabase.from('users')
+      .select('id, username').ilike('username', req.params.username).limit(1);
+    if (!data?.[0]) return res.json({ success: false, error: 'not_found' });
+    res.json({ success: true, data: data[0] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 app.get('/api/users/:userId', async (req, res) => {
   try {
     const { data, error } = await supabase.from('users').select('*').eq('id', req.params.userId);
