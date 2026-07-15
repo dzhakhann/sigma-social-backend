@@ -1162,7 +1162,7 @@ async function fetchYtVideos(handle, limit = 4) {
         videoId: vid,
         title: stripXml((e.match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || ''),
         link: `https://www.youtube.com/watch?v=${vid}`,
-        image: `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`,
+        image: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
         desc: '',
         source: chName,
         date: stripXml((e.match(/<published>([\s\S]*?)<\/published>/i) || [])[1] || ''),
@@ -1203,10 +1203,17 @@ function parseArticleFeed(xml, limit = 15) {
     const title = tag(block, 'title');
     const link = tag(block, 'link');
     if (!title || !link) continue;
-    // Image: media:content (pick the largest), media:thumbnail or enclosure.
+    // Image: media:content (pick the widest — width may appear before OR
+    // after the url attribute, e.g. Guardian puts width first).
     let image = '';
-    const medias = [...block.matchAll(/<media:content[^>]*url="([^"]+)"[^>]*(?:width="(\d+)")?/gi)]
-      .map((m) => ({ url: m[1], w: parseInt(m[2] || '0', 10) }))
+    const medias = [...block.matchAll(/<media:content\b[^>]*>/gi)]
+      .map((m) => {
+        const tag = m[0];
+        const url = (tag.match(/url="([^"]+)"/i) || [])[1] || '';
+        const w = parseInt((tag.match(/width="(\d+)"/i) || [])[1] || '0', 10);
+        return { url, w };
+      })
+      .filter((x) => x.url)
       .sort((a, b) => b.w - a.w);
     if (medias.length) image = medias[0].url;
     if (!image) image = (block.match(/<media:thumbnail[^>]*url="([^"]+)"/i) || [])[1] || '';
@@ -1216,14 +1223,10 @@ function parseArticleFeed(xml, limit = 15) {
       if (enc) image = enc[1];
     }
     image = (image || '').replace(/&amp;/g, '&');
-    // Guardian CDN returns tiny previews in RSS, but accepts any size via
-    // query params — request a sharp full-screen version instead.
-    if (image.includes('i.guim.co.uk')) {
-      image = image
-        .replace(/width=\d+/, 'width=1200')
-        .replace(/quality=\d+/, 'quality=85');
-      if (!image.includes('width=')) image += (image.includes('?') ? '&' : '?') + 'width=1200';
-    }
+    // NOTE: Guardian image URLs are signed (s=… hash). Changing width/quality
+    // invalidates the signature → 403. So we must use them verbatim. To still
+    // get a large photo, we pick the widest <media:content> the feed offers
+    // (handled above by sorting by width), rather than rewriting the URL.
     let desc = tag(block, 'description');
     if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
     let source = '';
