@@ -1123,7 +1123,7 @@ const NEWS_FEEDS = {
 // Playback happens ONLY through the official YouTube player in the app.
 const NEWS_YT = {
   en: ['@BBCNews', '@DWNews', '@aljazeeraenglish'],
-  ru: ['@bbcrussian', '@dwrussian', '@euronewsru'],
+  ru: ['@bbcrussian', '@dwrussian', '@euronewsru', '@meduzalive', '@tvrain'],
 };
 const _ytChannelCache = new Map(); // handle → channelId | null
 
