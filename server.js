@@ -1139,14 +1139,17 @@ const _newsCache = new Map(); // key → { ts, data }
 const NEWS_CACHE_MS = 15 * 60 * 1000;
 
 function stripXml(s) {
-  return (s || '')
-    .replace(/<!\[CDATA\[|\]\]>/g, '')
-    .replace(/<[^>]+>/g, '')
-    .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
-    .replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
-    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  let t = (s || '').replace(/<!\[CDATA\[|\]\]>/g, '');
+  // Decode entities FIRST (feeds ship entity-encoded HTML like &lt;p&gt;),
+  // then strip the real tags — twice, to survive double-encoded content.
+  for (let i = 0; i < 2; i++) {
+    t = t
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"').replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+      .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&');
+    t = t.replace(/<[^>]+>/g, ' ');
+  }
+  return t.replace(/\s+/g, ' ').trim();
 }
 
 app.get('/api/news', async (req, res) => {
@@ -1187,6 +1190,14 @@ app.get('/api/news', async (req, res) => {
         if (enc) image = enc[1];
       }
       image = (image || '').replace(/&amp;/g, '&');
+      // Guardian CDN returns tiny previews (width=140) in RSS, but accepts any
+      // size via query params — request a sharp full-screen version instead.
+      if (image.includes('i.guim.co.uk')) {
+        image = image
+          .replace(/width=\d+/, 'width=1200')
+          .replace(/quality=\d+/, 'quality=85');
+        if (!image.includes('width=')) image += (image.includes('?') ? '&' : '?') + 'width=1200';
+      }
       let desc = tag(block, 'description');
       if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
       let source = '';
