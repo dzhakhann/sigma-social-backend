@@ -1094,68 +1094,113 @@ app.post('/api/verification', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-// ─── NEWS (Google News RSS proxy — headlines + link to source, à la Google
-// Discover). We never store news; only proxy/parse and return metadata. This
-// is the legal "headline + attribution + link" model, safe for commercial use.
-const NEWS_TOPICS = {
-  world: { en: 'World', ru: 'Мир' },
-  politics: { en: 'Politics', ru: 'Политика' },
-  economy: { en: 'Business', ru: 'Экономика' },
-  tech: { en: 'Technology', ru: 'Технологии' },
-  ai: { en: 'Artificial Intelligence', ru: 'Искусственный интеллект' },
-  science: { en: 'Science', ru: 'Наука' },
-  auto: { en: 'Cars', ru: 'Автомобили' },
-  football: { en: 'Football', ru: 'Футбол' },
-  sport: { en: 'Sports', ru: 'Спорт' },
-  show: { en: 'Entertainment', ru: 'Шоу-бизнес' },
-  games: { en: 'Video games', ru: 'Игры' },
-  movies: { en: 'Movies', ru: 'Кино' },
-  music: { en: 'Music', ru: 'Музыка' },
+// ─── NEWS v2 (publisher RSS with IMAGES — Tinder-deck cards) ─────────────────
+// Standard aggregator model: headline + photo from the public RSS feed +
+// attribution + link to the source. Nothing is stored in our DB; the server
+// only proxies/parses and keeps a 15-minute in-memory cache.
+const NEWS_FEEDS = {
+  en: {
+    world: 'https://www.theguardian.com/world/rss',
+    politics: 'https://www.theguardian.com/politics/rss',
+    economy: 'https://www.theguardian.com/business/economics/rss',
+    business: 'https://www.theguardian.com/business/rss',
+    tech: 'https://www.theguardian.com/technology/rss',
+    ai: 'https://www.theguardian.com/technology/artificialintelligenceai/rss',
+    science: 'https://www.theguardian.com/science/rss',
+    space: 'https://www.theguardian.com/science/space/rss',
+    auto: 'https://www.theguardian.com/technology/motoring/rss',
+    football: 'https://www.theguardian.com/football/rss',
+    sport: 'https://www.theguardian.com/sport/rss',
+    show: 'https://www.theguardian.com/culture/rss',
+    games: 'https://www.theguardian.com/games/rss',
+    movies: 'https://www.theguardian.com/film/rss',
+    music: 'https://www.theguardian.com/music/rss',
+  },
+  ru: {
+    world: 'https://lenta.ru/rss/news/world',
+    politics: 'https://lenta.ru/rss/news/russia',
+    economy: 'https://lenta.ru/rss/news/economics',
+    business: 'https://lenta.ru/rss/news/economics',
+    tech: 'https://lenta.ru/rss/news/science',
+    ai: 'https://lenta.ru/rss/news/science',
+    science: 'https://lenta.ru/rss/news/science',
+    space: 'https://lenta.ru/rss/news/science',
+    auto: 'https://lenta.ru/rss/news/motor',
+    football: 'https://lenta.ru/rss/news/sport',
+    sport: 'https://lenta.ru/rss/news/sport',
+    show: 'https://lenta.ru/rss/news/culture',
+    games: 'https://lenta.ru/rss/news/culture',
+    movies: 'https://lenta.ru/rss/news/culture',
+    music: 'https://lenta.ru/rss/news/culture',
+  },
 };
+
+const _newsCache = new Map(); // key → { ts, data }
+const NEWS_CACHE_MS = 15 * 60 * 1000;
+
+function stripXml(s) {
+  return (s || '')
+    .replace(/<!\[CDATA\[|\]\]>/g, '')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
+    .replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
 
 app.get('/api/news', async (req, res) => {
   const cat = (req.query.cat || 'world').toString();
   const lang = req.query.lang === 'ru' ? 'ru' : 'en';
-  const hl = lang === 'ru' ? 'ru' : 'en-US';
-  const gl = lang === 'ru' ? 'RU' : 'US';
-  const topic = NEWS_TOPICS[cat] || NEWS_TOPICS.world;
-  const query = encodeURIComponent(topic[lang]);
+  const key = `${lang}:${cat}`;
+  const cached = _newsCache.get(key);
+  if (cached && Date.now() - cached.ts < NEWS_CACHE_MS) {
+    return res.json({ success: true, data: cached.data });
+  }
+  const feedUrl = (NEWS_FEEDS[lang] || NEWS_FEEDS.en)[cat]
+    || NEWS_FEEDS[lang].world;
   try {
-    const url =
-      `https://news.google.com/rss/search?q=${query}&hl=${hl}&gl=${gl}&ceid=${gl}:${lang}`;
-    const r = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 Sigmacta' } });
+    const r = await fetch(feedUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Sigmacta/1.1)' },
+    });
     const xml = await r.text();
-    const strip = (s) => (s || '')
-      .replace(/<!\[CDATA\[|\]\]>/g, '')
-      .replace(/<[^>]+>/g, '')
-      .replace(/&amp;/g, '&').replace(/&quot;/g, '"')
-      .replace(/&#0?39;/g, "'").replace(/&apos;/g, "'")
-      .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&nbsp;/g, ' ')
-      .trim();
     const tag = (block, name) => {
       const m = block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`, 'i'));
-      return m ? strip(m[1]) : '';
+      return m ? stripXml(m[1]) : '';
     };
     const items = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
     const data = [];
     for (const block of items) {
-      const rawTitle = tag(block, 'title');
-      const source = tag(block, 'source') ||
-        (rawTitle.includes(' - ') ? rawTitle.split(' - ').pop() : '');
-      const title = source && rawTitle.endsWith(' - ' + source)
-        ? rawTitle.slice(0, -(source.length + 3)).trim()
-        : rawTitle;
+      const title = tag(block, 'title');
       const link = tag(block, 'link');
       if (!title || !link) continue;
+      // Image: media:content (pick the largest), media:thumbnail or enclosure.
+      let image = '';
+      const medias = [...block.matchAll(/<media:content[^>]*url="([^"]+)"[^>]*(?:width="(\d+)")?/gi)]
+        .map((m) => ({ url: m[1], w: parseInt(m[2] || '0', 10) }))
+        .sort((a, b) => b.w - a.w);
+      if (medias.length) image = medias[0].url;
+      if (!image) image = (block.match(/<media:thumbnail[^>]*url="([^"]+)"/i) || [])[1] || '';
+      if (!image) {
+        const enc = block.match(/<enclosure[^>]*url="([^"]+)"[^>]*type="image[^"]*"/i)
+          || block.match(/<enclosure[^>]*type="image[^"]*"[^>]*url="([^"]+)"/i);
+        if (enc) image = enc[1];
+      }
+      image = (image || '').replace(/&amp;/g, '&');
+      let desc = tag(block, 'description');
+      if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
+      let source = '';
+      try { source = new URL(link).hostname.replace(/^www\./, ''); } catch {}
       data.push({
-        title,
-        source,
-        link,
+        id: Buffer.from(link).toString('base64').slice(0, 32),
+        title, link, image, desc, source,
         date: tag(block, 'pubDate'),
         category: cat,
       });
-      if (data.length >= 20) break;
+      if (data.length >= 25) break;
     }
+    if (_newsCache.size > 60) _newsCache.clear();
+    _newsCache.set(key, { ts: Date.now(), data });
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
