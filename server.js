@@ -1098,42 +1098,82 @@ app.post('/api/verification', authRequired, async (req, res) => {
 // Standard aggregator model: headline + photo from the public RSS feed +
 // attribution + link to the source. Nothing is stored in our DB; the server
 // only proxies/parses and keeps a 15-minute in-memory cache.
+// "Газета" — ONE mixed stream per language (no categories): several article
+// feeds interleaved + YouTube news videos (official embeds, ToS-compliant).
 const NEWS_FEEDS = {
-  en: {
-    world: 'https://www.theguardian.com/world/rss',
-    politics: 'https://www.theguardian.com/politics/rss',
-    economy: 'https://www.theguardian.com/business/economics/rss',
-    business: 'https://www.theguardian.com/business/rss',
-    tech: 'https://www.theguardian.com/technology/rss',
-    ai: 'https://www.theguardian.com/technology/artificialintelligenceai/rss',
-    science: 'https://www.theguardian.com/science/rss',
-    space: 'https://www.theguardian.com/science/space/rss',
-    auto: 'https://www.theguardian.com/technology/motoring/rss',
-    football: 'https://www.theguardian.com/football/rss',
-    sport: 'https://www.theguardian.com/sport/rss',
-    show: 'https://www.theguardian.com/culture/rss',
-    games: 'https://www.theguardian.com/games/rss',
-    movies: 'https://www.theguardian.com/film/rss',
-    music: 'https://www.theguardian.com/music/rss',
-  },
-  ru: {
-    world: 'https://lenta.ru/rss/news/world',
-    politics: 'https://lenta.ru/rss/news/russia',
-    economy: 'https://lenta.ru/rss/news/economics',
-    business: 'https://lenta.ru/rss/news/economics',
-    tech: 'https://lenta.ru/rss/news/science',
-    ai: 'https://lenta.ru/rss/news/science',
-    science: 'https://lenta.ru/rss/news/science',
-    space: 'https://lenta.ru/rss/news/science',
-    auto: 'https://lenta.ru/rss/news/motor',
-    football: 'https://lenta.ru/rss/news/sport',
-    sport: 'https://lenta.ru/rss/news/sport',
-    show: 'https://lenta.ru/rss/news/culture',
-    games: 'https://lenta.ru/rss/news/culture',
-    movies: 'https://lenta.ru/rss/news/culture',
-    music: 'https://lenta.ru/rss/news/culture',
-  },
+  en: [
+    'https://www.theguardian.com/world/rss',
+    'https://www.theguardian.com/technology/rss',
+    'https://www.theguardian.com/business/rss',
+    'https://www.theguardian.com/sport/rss',
+    'https://www.theguardian.com/science/rss',
+    'https://www.theguardian.com/culture/rss',
+  ],
+  ru: [
+    'https://lenta.ru/rss/news/world',
+    'https://lenta.ru/rss/news/science',
+    'https://lenta.ru/rss/news/economics',
+    'https://lenta.ru/rss/news/sport',
+    'https://lenta.ru/rss/news/culture',
+    'https://lenta.ru/rss/news/motor',
+  ],
 };
+
+// YouTube news channels (handles → channelId resolved at runtime & cached).
+// Playback happens ONLY through the official YouTube player in the app.
+const NEWS_YT = {
+  en: ['@BBCNews', '@DWNews', '@aljazeeraenglish'],
+  ru: ['@bbcrussian', '@dwrussian', '@euronewsru'],
+};
+const _ytChannelCache = new Map(); // handle → channelId | null
+
+async function resolveYtChannel(handle) {
+  if (_ytChannelCache.has(handle)) return _ytChannelCache.get(handle);
+  try {
+    const r = await fetch(`https://www.youtube.com/${handle}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36' },
+    });
+    const html = await r.text();
+    const id = (html.match(/"channelId":"(UC[\w-]{22})"/) || [])[1] || null;
+    _ytChannelCache.set(handle, id);
+    return id;
+  } catch {
+    _ytChannelCache.set(handle, null);
+    return null;
+  }
+}
+
+async function fetchYtVideos(handle, limit = 4) {
+  const channelId = await resolveYtChannel(handle);
+  if (!channelId) return [];
+  try {
+    const r = await fetch(
+      `https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`);
+    const xml = await r.text();
+    const entries = xml.match(/<entry>[\s\S]*?<\/entry>/gi) || [];
+    const chName = stripXml((xml.match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || handle);
+    const out = [];
+    for (const e of entries) {
+      const vid = (e.match(/<yt:videoId>([\w-]+)<\/yt:videoId>/i) || [])[1];
+      if (!vid) continue;
+      out.push({
+        id: 'yt_' + vid,
+        type: 'video',
+        videoId: vid,
+        title: stripXml((e.match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || ''),
+        link: `https://www.youtube.com/watch?v=${vid}`,
+        image: `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`,
+        desc: '',
+        source: chName,
+        date: stripXml((e.match(/<published>([\s\S]*?)<\/published>/i) || [])[1] || ''),
+      });
+      if (out.length >= limit) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
 
 const _newsCache = new Map(); // key → { ts, data }
 const NEWS_CACHE_MS = 15 * 60 * 1000;
@@ -1152,65 +1192,99 @@ function stripXml(s) {
   return t.replace(/\s+/g, ' ').trim();
 }
 
+function parseArticleFeed(xml, limit = 15) {
+  const tag = (block, name) => {
+    const m = block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`, 'i'));
+    return m ? stripXml(m[1]) : '';
+  };
+  const items = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
+  const out = [];
+  for (const block of items) {
+    const title = tag(block, 'title');
+    const link = tag(block, 'link');
+    if (!title || !link) continue;
+    // Image: media:content (pick the largest), media:thumbnail or enclosure.
+    let image = '';
+    const medias = [...block.matchAll(/<media:content[^>]*url="([^"]+)"[^>]*(?:width="(\d+)")?/gi)]
+      .map((m) => ({ url: m[1], w: parseInt(m[2] || '0', 10) }))
+      .sort((a, b) => b.w - a.w);
+    if (medias.length) image = medias[0].url;
+    if (!image) image = (block.match(/<media:thumbnail[^>]*url="([^"]+)"/i) || [])[1] || '';
+    if (!image) {
+      const enc = block.match(/<enclosure[^>]*url="([^"]+)"[^>]*type="image[^"]*"/i)
+        || block.match(/<enclosure[^>]*type="image[^"]*"[^>]*url="([^"]+)"/i);
+      if (enc) image = enc[1];
+    }
+    image = (image || '').replace(/&amp;/g, '&');
+    // Guardian CDN returns tiny previews in RSS, but accepts any size via
+    // query params — request a sharp full-screen version instead.
+    if (image.includes('i.guim.co.uk')) {
+      image = image
+        .replace(/width=\d+/, 'width=1200')
+        .replace(/quality=\d+/, 'quality=85');
+      if (!image.includes('width=')) image += (image.includes('?') ? '&' : '?') + 'width=1200';
+    }
+    let desc = tag(block, 'description');
+    if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
+    let source = '';
+    try { source = new URL(link).hostname.replace(/^www\./, ''); } catch {}
+    out.push({
+      id: Buffer.from(link).toString('base64').slice(0, 32),
+      title, link, image, desc, source,
+      date: tag(block, 'pubDate'),
+    });
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
 app.get('/api/news', async (req, res) => {
-  const cat = (req.query.cat || 'world').toString();
   const lang = req.query.lang === 'ru' ? 'ru' : 'en';
-  const key = `${lang}:${cat}`;
+  const key = `mix:${lang}`;
   const cached = _newsCache.get(key);
   if (cached && Date.now() - cached.ts < NEWS_CACHE_MS) {
     return res.json({ success: true, data: cached.data });
   }
-  const feedUrl = (NEWS_FEEDS[lang] || NEWS_FEEDS.en)[cat]
-    || NEWS_FEEDS[lang].world;
   try {
-    const r = await fetch(feedUrl, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Sigmacta/1.1)' },
-    });
-    const xml = await r.text();
-    const tag = (block, name) => {
-      const m = block.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`, 'i'));
-      return m ? stripXml(m[1]) : '';
-    };
-    const items = xml.match(/<item[\s\S]*?<\/item>/gi) || [];
-    const data = [];
-    for (const block of items) {
-      const title = tag(block, 'title');
-      const link = tag(block, 'link');
-      if (!title || !link) continue;
-      // Image: media:content (pick the largest), media:thumbnail or enclosure.
-      let image = '';
-      const medias = [...block.matchAll(/<media:content[^>]*url="([^"]+)"[^>]*(?:width="(\d+)")?/gi)]
-        .map((m) => ({ url: m[1], w: parseInt(m[2] || '0', 10) }))
-        .sort((a, b) => b.w - a.w);
-      if (medias.length) image = medias[0].url;
-      if (!image) image = (block.match(/<media:thumbnail[^>]*url="([^"]+)"/i) || [])[1] || '';
-      if (!image) {
-        const enc = block.match(/<enclosure[^>]*url="([^"]+)"[^>]*type="image[^"]*"/i)
-          || block.match(/<enclosure[^>]*type="image[^"]*"[^>]*url="([^"]+)"/i);
-        if (enc) image = enc[1];
+    const feeds = NEWS_FEEDS[lang] || NEWS_FEEDS.en;
+    const ytHandles = NEWS_YT[lang] || NEWS_YT.en;
+    // Fetch all article feeds + video channels in parallel.
+    const [feedResults, ...videoLists] = await Promise.all([
+      Promise.all(feeds.map(async (u) => {
+        try {
+          const r = await fetch(u, {
+            headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Sigmacta/1.1)' },
+          });
+          return parseArticleFeed(await r.text(), 12);
+        } catch { return []; }
+      })),
+      ...ytHandles.map((h) => fetchYtVideos(h, 4)),
+    ]);
+    // Interleave article feeds round-robin, dedupe by link.
+    const seen = new Set();
+    const articles = [];
+    for (let i = 0; i < 12; i++) {
+      for (const list of feedResults) {
+        const it = list[i];
+        if (it && !seen.has(it.link)) {
+          seen.add(it.link);
+          articles.push(it);
+        }
       }
-      image = (image || '').replace(/&amp;/g, '&');
-      // Guardian CDN returns tiny previews (width=140) in RSS, but accepts any
-      // size via query params — request a sharp full-screen version instead.
-      if (image.includes('i.guim.co.uk')) {
-        image = image
-          .replace(/width=\d+/, 'width=1200')
-          .replace(/quality=\d+/, 'quality=85');
-        if (!image.includes('width=')) image += (image.includes('?') ? '&' : '?') + 'width=1200';
-      }
-      let desc = tag(block, 'description');
-      if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
-      let source = '';
-      try { source = new URL(link).hostname.replace(/^www\./, ''); } catch {}
-      data.push({
-        id: Buffer.from(link).toString('base64').slice(0, 32),
-        title, link, image, desc, source,
-        date: tag(block, 'pubDate'),
-        category: cat,
-      });
-      if (data.length >= 25) break;
     }
-    if (_newsCache.size > 60) _newsCache.clear();
+    // Shuffle videos from all channels together (newest first-ish).
+    const videos = videoLists.flat();
+    // Weave: a video every 4th card while videos remain.
+    const data = [];
+    let vi = 0;
+    for (let i = 0; i < articles.length && data.length < 48; i++) {
+      data.push(articles[i]);
+      if ((data.length + 1) % 4 === 0 && vi < videos.length) {
+        data.push(videos[vi++]);
+      }
+    }
+    while (vi < videos.length && data.length < 48) data.push(videos[vi++]);
+    if (_newsCache.size > 10) _newsCache.clear();
     _newsCache.set(key, { ts: Date.now(), data });
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
