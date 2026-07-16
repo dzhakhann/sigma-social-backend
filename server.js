@@ -1162,7 +1162,9 @@ async function fetchYtVideos(handle, limit = 4) {
         videoId: vid,
         title: stripXml((e.match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || ''),
         link: `https://www.youtube.com/watch?v=${vid}`,
-        image: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
+        // HD thumbnail; client falls back to hqdefault if maxres is missing.
+        image: `https://i.ytimg.com/vi/${vid}/maxresdefault.jpg`,
+        thumb: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
         desc: '',
         source: chName,
         date: stripXml((e.match(/<published>([\s\S]*?)<\/published>/i) || [])[1] || ''),
@@ -1224,9 +1226,10 @@ function parseArticleFeed(xml, limit = 15) {
     }
     image = (image || '').replace(/&amp;/g, '&');
     // NOTE: Guardian image URLs are signed (s=… hash). Changing width/quality
-    // invalidates the signature → 403. So we must use them verbatim. To still
-    // get a large photo, we pick the widest <media:content> the feed offers
-    // (handled above by sorting by width), rather than rewriting the URL.
+    // invalidates the signature → 403, so we use them verbatim and pick the
+    // widest <media:content> (700px) the feed offers.
+    // Skip imageless stories (opinion/late-night) — every card must have a photo.
+    if (!image) continue;
     let desc = tag(block, 'description');
     if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
     let source = '';
