@@ -37,8 +37,16 @@
       tag.src = 'https://www.youtube.com/iframe_api';
       document.head.appendChild(tag);
 
+      var player = null;
+      // Called from the app (WebViewController.runJavaScript) to toggle sound
+      // without reloading the video.
+      window.sigmaSetMuted = function (m) {
+        if (!player) return;
+        try { m ? player.mute() : player.unMute(); } catch (e) {}
+      };
+
       window.onYouTubeIframeAPIReady = function () {
-        new YT.Player('p', {
+        player = new YT.Player('p', {
           videoId: vid,
           playerVars: {
             autoplay: 1,
