@@ -1109,31 +1109,63 @@ app.post('/api/verification', authRequired, async (req, res) => {
 // "Газета" — ONE mixed stream per language (no categories): several article
 // feeds interleaved + YouTube news videos (official embeds, ToS-compliant).
 const NEWS_FEEDS = {
+  // Mixed topics per language: world/politics, sport, showbiz, music, IT,
+  // finance, games, movies. Feeds without RSS images are fine — og:image
+  // enrichment fills the photo from the article page.
   en: [
     'https://www.theguardian.com/world/rss',
     'https://www.theguardian.com/technology/rss',
     'https://www.theguardian.com/business/rss',
-    'https://www.theguardian.com/sport/rss',
-    'https://www.theguardian.com/science/rss',
     'https://www.theguardian.com/culture/rss',
+    'https://feeds.bbci.co.uk/sport/rss.xml',                 // sport
+    'https://techcrunch.com/feed/',                           // IT/startups
+    'https://feeds.arstechnica.com/arstechnica/index',        // IT/science
+    'https://variety.com/feed/',                              // showbiz/movies
+    'https://screenrant.com/feed/',                           // movies/series
+    'https://www.rollingstone.com/feed/',                     // music
+    'https://www.nme.com/feed',                               // music
+    'https://www.cnbc.com/id/100003114/device/rss/rss.html',  // finance
+    'https://www.gamespot.com/feeds/game-news/',              // games
   ],
   ru: [
     'https://lenta.ru/rss/news/world',
-    'https://lenta.ru/rss/news/science',
     'https://lenta.ru/rss/news/economics',
-    'https://lenta.ru/rss/news/sport',
+    'https://lenta.ru/rss/news/science',
     'https://lenta.ru/rss/news/culture',
-    'https://lenta.ru/rss/news/motor',
+    'https://www.championat.com/rss/news/',                   // спорт
+    'https://www.sports.ru/rss/main.xml',                     // спорт
+    'https://3dnews.ru/news/rss/',                            // IT/железо
+    'https://habr.com/ru/rss/news/?fl=ru',                    // IT
+    'https://rssexport.rbc.ru/rbcnews/news/30/full.rss',      // финансы
+    'https://stopgame.ru/rss/rss_news.xml',                   // игры
+    'https://daily.afisha.ru/rss/',                           // кино/шоу-биз
+    'https://www.intermedia.ru/rss',                          // музыка/шоу-биз
   ],
 };
 
 // YouTube news channels (handles → channelId resolved at runtime & cached).
 // Playback happens ONLY through the official YouTube player in the app.
 const NEWS_YT = {
-  en: ['@BBCNews', '@DWNews', '@aljazeeraenglish'],
-  // @bbcrussian no longer exists (BBC closed it); use the current handle. Real
-  // news channels only — handles are resolved reliably via the Data API below.
-  ru: ['@bbcnewsrussian', '@dwrussian', '@euronewsru', '@meduzalive', '@tvrain', '@rtvi'],
+  // Mixed-topic channels: news, sport, showbiz, music, IT, finance, games,
+  // movies. Handles are resolved reliably via the Data API below.
+  en: [
+    '@BBCNews', '@DWNews', '@aljazeeraenglish',
+    '@skysportsnews',            // sport
+    '@Variety',                  // showbiz
+    '@BBCRadio1',                // music
+    '@TheVerge',                 // IT
+    '@CNBCtelevision',           // finance
+    '@IGN',                      // games
+    '@RottenTomatoesTRAILERS',   // movies
+  ],
+  // @bbcrussian no longer exists (BBC closed it); use the current handle.
+  ru: [
+    '@bbcnewsrussian', '@dwrussian', '@euronewsru', '@meduzalive', '@tvrain', '@rtvi',
+    '@matchtv',                  // спорт
+    '@rozetked', '@wylsacom',    // IT
+    '@stopgameru', '@igromania', // игры
+    '@kinopoisk',                // кино
+  ],
 };
 const _ytChannelCache = new Map(); // handle → channelId | null
 
@@ -1315,8 +1347,9 @@ function parseArticleFeed(xml, limit = 15) {
     // NOTE: Guardian image URLs are signed (s=… hash). Changing width/quality
     // invalidates the signature → 403, so we use them verbatim and pick the
     // widest <media:content> (700px) the feed offers.
-    // Skip imageless stories (opinion/late-night) — every card must have a photo.
-    if (!image) continue;
+    // Imageless items are kept — some feeds (TechCrunch, CNBC, habr) ship no
+    // RSS image at all; og:image enrichment fills it in, and anything still
+    // imageless after that gets dropped in /api/news.
     let desc = tag(block, 'description');
     if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
     let source = '';
@@ -1392,19 +1425,28 @@ app.get('/api/news', async (req, res) => {
       }
     }
     // Upgrade each article to its HD og:image (1200px) in parallel; keep the
-    // small RSS image as fallback. Runs once per 15-min cache window.
-    await Promise.all(articles.map(async (a) => {
+    // small RSS image as fallback. Runs once per 15-min cache window. The pool
+    // is capped — each og lookup is a page fetch.
+    let pool = articles.slice(0, 60);
+    await Promise.all(pool.map(async (a) => {
       const og = await ogImage(a.link);
       if (og) { a.thumb = a.image; a.image = og; }
     }));
-    // Shuffle videos from all channels together (newest first-ish), then keep
-    // only the ones that will really play in the app's embedded player.
-    const videos = await filterPlayableVideos(videoLists.flat());
+    // Every card must have a photo — drop stories that still have none.
+    pool = pool.filter((a) => a.image);
+    // Interleave videos round-robin across channels (1st of each channel, then
+    // 2nd of each…) so the woven deck cycles topics instead of dumping one
+    // channel first. Then keep only clips that will really play embedded.
+    const vpool = [];
+    for (let i = 0; i < 10; i++) {
+      for (const list of videoLists) if (list[i]) vpool.push(list[i]);
+    }
+    const videos = await filterPlayableVideos(vpool);
     // Weave: a video every 4th card while videos remain.
     const data = [];
     let vi = 0;
-    for (let i = 0; i < articles.length && data.length < 48; i++) {
-      data.push(articles[i]);
+    for (let i = 0; i < pool.length && data.length < 48; i++) {
+      data.push(pool[i]);
       if ((data.length + 1) % 4 === 0 && vi < videos.length) {
         data.push(videos[vi++]);
       }
