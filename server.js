@@ -1127,6 +1127,63 @@ const NEWS_YT = {
 };
 const _ytChannelCache = new Map(); // handle → channelId | null
 
+// Free YouTube Data API key (Google Cloud → "YouTube Data API v3"). Used ONLY to
+// check which videos will actually play in the app's embedded player. Cost is
+// 1 quota unit per 50 ids, so effectively free. Without it the filter is a
+// no-op and videos pass through unchecked (some may fail to embed).
+const YOUTUBE_API_KEY = process.env.YOUTUBE_API_KEY || '';
+let _ytFilterWarned = false;
+
+// Keep only videos that will actually play inside the in-app YouTube player:
+// embeddable + public + fully processed + NOT a live/upcoming stream + not
+// age-restricted. Offline live streams (LIVE_STREAM_OFFLINE) and premieres are
+// the main cause of the "This video is unavailable" error, so they're dropped.
+async function filterPlayableVideos(videos) {
+  if (videos.length === 0) return videos;
+  if (!YOUTUBE_API_KEY) {
+    if (!_ytFilterWarned) {
+      console.warn('[news] YOUTUBE_API_KEY not set — video embeddability filter disabled');
+      _ytFilterWarned = true;
+    }
+    return videos;
+  }
+  const ids = videos.map((v) => v.videoId);
+  const ok = new Set();
+  for (let i = 0; i < ids.length; i += 50) {
+    const batch = ids.slice(i, i + 50);
+    try {
+      const r = await fetch(
+        'https://www.googleapis.com/youtube/v3/videos'
+        + '?part=status,snippet,contentDetails'
+        + `&id=${batch.join(',')}&key=${YOUTUBE_API_KEY}`);
+      const j = await r.json();
+      if (j.error) throw new Error(j.error.message || 'yt api error');
+      for (const item of (j.items || [])) {
+        const s = item.status || {};
+        const sn = item.snippet || {};
+        const cd = item.contentDetails || {};
+        const ageRestricted =
+          cd.contentRating && cd.contentRating.ytRating === 'ytAgeRestricted';
+        if (
+          s.embeddable === true &&
+          s.privacyStatus === 'public' &&
+          s.uploadStatus === 'processed' &&
+          sn.liveBroadcastContent === 'none' &&
+          !ageRestricted
+        ) {
+          ok.add(item.id);
+        }
+      }
+    } catch (e) {
+      // Fail open on a transient API error: better to show a maybe-broken video
+      // (the app has a "Watch on YouTube" fallback) than an empty feed.
+      console.warn('[news] embeddability check failed:', e.message);
+      for (const id of batch) ok.add(id);
+    }
+  }
+  return videos.filter((v) => ok.has(v.videoId));
+}
+
 async function resolveYtChannel(handle) {
   if (_ytChannelCache.has(handle)) return _ytChannelCache.get(handle);
   try {
@@ -1290,7 +1347,7 @@ app.get('/api/news', async (req, res) => {
           return parseArticleFeed(await r.text(), 12);
         } catch { return []; }
       })),
-      ...ytHandles.map((h) => fetchYtVideos(h, 4)),
+      ...ytHandles.map((h) => fetchYtVideos(h, 10)),
     ]);
     // Interleave article feeds round-robin, dedupe by link.
     const seen = new Set();
@@ -1310,8 +1367,9 @@ app.get('/api/news', async (req, res) => {
       const og = await ogImage(a.link);
       if (og) { a.thumb = a.image; a.image = og; }
     }));
-    // Shuffle videos from all channels together (newest first-ish).
-    const videos = videoLists.flat();
+    // Shuffle videos from all channels together (newest first-ish), then keep
+    // only the ones that will really play in the app's embedded player.
+    const videos = await filterPlayableVideos(videoLists.flat());
     // Weave: a video every 4th card while videos remain.
     const data = [];
     let vi = 0;
