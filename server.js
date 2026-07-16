@@ -1262,6 +1262,8 @@ async function resolveYtChannel(handle) {
   }
 }
 
+const YT_MIN_DATE = new Date('2024-01-01T00:00:00Z');
+
 async function fetchYtVideos(handle, limit = 4) {
   const channelId = await resolveYtChannel(handle);
   if (!channelId) return [];
@@ -1275,6 +1277,11 @@ async function fetchYtVideos(handle, limit = 4) {
     for (const e of entries) {
       const vid = (e.match(/<yt:videoId>([\w-]+)<\/yt:videoId>/i) || [])[1];
       if (!vid) continue;
+      const published =
+        stripXml((e.match(/<published>([\s\S]*?)<\/published>/i) || [])[1] || '');
+      // Only reasonably fresh clips — nothing older than 2024.
+      const pub = new Date(published);
+      if (isNaN(pub) || pub < YT_MIN_DATE) continue;
       out.push({
         id: 'yt_' + vid,
         type: 'video',
@@ -1286,7 +1293,7 @@ async function fetchYtVideos(handle, limit = 4) {
         thumb: `https://i.ytimg.com/vi/${vid}/hqdefault.jpg`,
         desc: '',
         source: chName,
-        date: stripXml((e.match(/<published>([\s\S]*?)<\/published>/i) || [])[1] || ''),
+        date: pub.toISOString(),
       });
       if (out.length >= limit) break;
     }
@@ -1354,10 +1361,18 @@ function parseArticleFeed(xml, limit = 15) {
     if (desc.length > 220) desc = desc.slice(0, 217).trimEnd() + '…';
     let source = '';
     try { source = new URL(link).hostname.replace(/^www\./, ''); } catch {}
+    // Normalize the date to ISO-8601 UTC. RSS ships RFC-822 with an offset
+    // (e.g. Lenta "+0300"); the app's Dart parser can't read that and treated
+    // Moscow time as UTC → "-129m" future timestamps. new Date() honors the
+    // offset, toISOString() gives clean UTC the app parses correctly.
+    const rawDate = tag(block, 'pubDate') || tag(block, 'published') ||
+        tag(block, 'date');
+    const parsed = new Date(rawDate);
+    const date = isNaN(parsed) ? rawDate : parsed.toISOString();
     out.push({
       id: Buffer.from(link).toString('base64').slice(0, 32),
       title, link, image, desc, source,
-      date: tag(block, 'pubDate'),
+      date,
     });
     if (out.length >= limit) break;
   }

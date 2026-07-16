@@ -38,12 +38,15 @@
       document.head.appendChild(tag);
 
       var player = null;
-      // Called from the app (WebViewController.runJavaScript) to toggle sound
-      // without reloading the video.
+      // Called from the app (WebViewController.runJavaScript).
       window.sigmaSetMuted = function (m) {
         if (!player) return;
         try { m ? player.mute() : player.unMute(); } catch (e) {}
       };
+      // Auto-pause/resume when the card scrolls off-screen or the tab changes.
+      // pauseVideo() keeps the position, so playVideo() resumes from the spot.
+      window.sigmaPause = function () { try { player && player.pauseVideo(); } catch (e) {} };
+      window.sigmaPlay = function () { try { player && player.playVideo(); } catch (e) {} };
 
       window.onYouTubeIframeAPIReady = function () {
         player = new YT.Player('p', {
