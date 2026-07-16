@@ -1126,6 +1126,8 @@ const NEWS_FEEDS = {
     'https://www.nme.com/feed',                               // music
     'https://www.cnbc.com/id/100003114/device/rss/rss.html',  // finance
     'https://www.gamespot.com/feeds/game-news/',              // games
+    'https://www.polygon.com/rss/index.xml',                  // games/culture
+    'https://www.hollywoodreporter.com/feed/',                // movies/showbiz
   ],
   ru: [
     'https://lenta.ru/rss/news/world',
@@ -1138,8 +1140,12 @@ const NEWS_FEEDS = {
     'https://habr.com/ru/rss/news/?fl=ru',                    // IT
     'https://rssexport.rbc.ru/rbcnews/news/30/full.rss',      // финансы
     'https://stopgame.ru/rss/rss_news.xml',                   // игры
+    'https://dtf.ru/rss',                                     // игры/культура
     'https://daily.afisha.ru/rss/',                           // кино/шоу-биз
     'https://www.intermedia.ru/rss',                          // музыка/шоу-биз
+    'https://vc.ru/rss',                                      // IT/бизнес
+    'https://tass.ru/rss/v2.xml',                             // новости
+    'https://meduza.io/rss/all',                              // новости
   ],
 };
 
@@ -1408,14 +1414,8 @@ async function ogImage(url) {
   }
 }
 
-app.get('/api/news', async (req, res) => {
-  const lang = req.query.lang === 'ru' ? 'ru' : 'en';
-  const key = `mix:${lang}`;
-  const cached = _newsCache.get(key);
-  if (cached && Date.now() - cached.ts < NEWS_CACHE_MS) {
-    return res.json({ success: true, data: cached.data });
-  }
-  try {
+async function buildNews(lang) {
+  {
     const feeds = NEWS_FEEDS[lang] || NEWS_FEEDS.en;
     const ytHandles = NEWS_YT[lang] || NEWS_YT.en;
     // Fetch all article feeds + video channels in parallel.
@@ -1470,11 +1470,50 @@ app.get('/api/news', async (req, res) => {
       }
     }
     while (vi < videos.length && data.length < 90) data.push(videos[vi++]);
-    if (_newsCache.size > 10) _newsCache.clear();
+    return data;
+  }
+}
+
+// Rebuild a language's feed in the background (never throws). A single-flight
+// guard stops overlapping rebuilds.
+const _refreshing = {};
+async function refreshNews(lang) {
+  if (_refreshing[lang]) return;
+  _refreshing[lang] = true;
+  try {
+    const data = await buildNews(lang);
+    _newsCache.set(`mix:${lang}`, { ts: Date.now(), data });
+  } catch (e) {
+    console.warn('[news] refresh failed', lang, e.message);
+  } finally {
+    _refreshing[lang] = false;
+  }
+}
+
+app.get('/api/news', async (req, res) => {
+  const lang = req.query.lang === 'ru' ? 'ru' : 'en';
+  const key = `mix:${lang}`;
+  const cached = _newsCache.get(key);
+  // Stale-while-revalidate: always answer instantly from cache; if it's stale,
+  // kick off a background refresh so the NEXT request is fresh — nobody waits.
+  if (cached) {
+    if (Date.now() - cached.ts >= NEWS_CACHE_MS) refreshNews(lang);
+    return res.json({ success: true, data: cached.data });
+  }
+  // Cold: no cache at all (first ever hit) — build once and block.
+  try {
+    const data = await buildNews(lang);
     _newsCache.set(key, { ts: Date.now(), data });
     res.json({ success: true, data });
-  } catch (e) { res.json({ success: false, error: e.message }); }
+  } catch (e) {
+    res.json({ success: false, error: e.message });
+  }
 });
+
+// Keep both languages warm: refresh every 15 min in the background, and once
+// on boot so the very first user already gets a cached (instant) response.
+setInterval(() => { refreshNews('en'); refreshNews('ru'); }, NEWS_CACHE_MS);
+setTimeout(() => { refreshNews('en'); refreshNews('ru'); }, 3000);
 
 // ─── POSTS ────────────────────────────────────────────────────────────────────
 
