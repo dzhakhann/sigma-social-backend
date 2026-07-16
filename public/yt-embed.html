@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<!-- Minimal YouTube embed host page. Served from our real https origin so the
+     iframe player gets a valid HTTP Referer — without one YouTube now refuses
+     to play anything ("Error 153"). The Flutter app opens this page in a
+     WebView instead of building the player HTML in-memory.
+     Query params: v=<videoId> mute=1 controls=0 loop=1
+     Events are reported to the app via the SigmaYT JavaScript channel (and
+     mirrored into document.title for easy testing in a normal browser). -->
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+    #p { position: absolute; inset: 0; }
+    /* The API replaces #p with an <iframe id="p"> — make it fill the page. */
+    iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+  </style>
+</head>
+<body>
+  <div id="p"></div>
+  <script>
+    var q = new URLSearchParams(location.search);
+    var vid = (q.get('v') || '').replace(/[^\w-]/g, '');
+    var mute = q.get('mute') === '1';
+    var controls = q.get('controls') !== '0';
+    var loop = q.get('loop') === '1';
+    var started = false;
+
+    function send(m) {
+      document.title = m;
+      if (window.SigmaYT) { try { SigmaYT.postMessage(m); } catch (e) {} }
+    }
+
+    if (!vid) { send('error:no-video'); } else {
+      var tag = document.createElement('script');
+      tag.src = 'https://www.youtube.com/iframe_api';
+      document.head.appendChild(tag);
+
+      window.onYouTubeIframeAPIReady = function () {
+        new YT.Player('p', {
+          videoId: vid,
+          playerVars: {
+            autoplay: 1,
+            mute: mute ? 1 : 0,
+            controls: controls ? 1 : 0,
+            playsinline: 1,
+            rel: 0,
+            fs: 0,
+            iv_load_policy: 3,
+            loop: loop ? 1 : 0,
+            playlist: loop ? vid : undefined
+          },
+          events: {
+            onReady: function (e) {
+              if (mute) e.target.mute();
+              e.target.playVideo();
+              send('ready');
+            },
+            onStateChange: function (e) {
+              if (e.data === YT.PlayerState.PLAYING) { started = true; send('playing'); }
+              else if (e.data === YT.PlayerState.ENDED) send('ended');
+            },
+            onError: function (e) { send('error:' + e.data); }
+          }
+        });
+      };
+
+      setTimeout(function () { if (!started) send('timeout'); }, 8000);
+    }
+  </script>
+</body>
+</html>

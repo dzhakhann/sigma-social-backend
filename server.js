@@ -292,6 +292,14 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'));
 });
 
+// ─── YOUTUBE EMBED HOST PAGE (for the app's news video player) ───────────────
+// YouTube refuses embeds without a valid HTTP Referer ("Error 153"), so the
+// app can't build the player HTML in-memory — it must load a real https page.
+// This page lives on our origin and hosts the official iframe player.
+app.get('/yt', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'yt-embed.html'));
+});
+
 // ─── AUTH ─────────────────────────────────────────────────────────────────────
 
 // ─── Register: username + password only. No email, no phone.
