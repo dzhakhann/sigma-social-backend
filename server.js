@@ -1123,7 +1123,9 @@ const NEWS_FEEDS = {
 // Playback happens ONLY through the official YouTube player in the app.
 const NEWS_YT = {
   en: ['@BBCNews', '@DWNews', '@aljazeeraenglish'],
-  ru: ['@bbcrussian', '@dwrussian', '@euronewsru', '@meduzalive', '@tvrain'],
+  // @bbcrussian no longer exists (BBC closed it); use the current handle. Real
+  // news channels only — handles are resolved reliably via the Data API below.
+  ru: ['@bbcnewsrussian', '@dwrussian', '@euronewsru', '@meduzalive', '@tvrain', '@rtvi'],
 };
 const _ytChannelCache = new Map(); // handle → channelId | null
 
@@ -1164,12 +1166,16 @@ async function filterPlayableVideos(videos) {
         const cd = item.contentDetails || {};
         const ageRestricted =
           cd.contentRating && cd.contentRating.ytRating === 'ytAgeRestricted';
+        // Any regionRestriction (allowed OR blocked list) is risky for a mixed
+        // audience — drop it rather than serve a video that's blocked for some.
+        const regionRestricted = !!cd.regionRestriction;
         if (
           s.embeddable === true &&
           s.privacyStatus === 'public' &&
           s.uploadStatus === 'processed' &&
           sn.liveBroadcastContent === 'none' &&
-          !ageRestricted
+          !ageRestricted &&
+          !regionRestricted
         ) {
           ok.add(item.id);
         }
@@ -1186,6 +1192,22 @@ async function filterPlayableVideos(videos) {
 
 async function resolveYtChannel(handle) {
   if (_ytChannelCache.has(handle)) return _ytChannelCache.get(handle);
+  // Preferred: YouTube Data API forHandle — exact & reliable. The old HTML
+  // scrape sometimes grabbed a *recommended* channel's id (e.g. a breakdance
+  // channel instead of the news one), so only fall back to it without a key.
+  if (YOUTUBE_API_KEY) {
+    try {
+      const h = handle.replace(/^@/, '');
+      const r = await fetch(
+        'https://www.googleapis.com/youtube/v3/channels'
+        + `?part=id&forHandle=${encodeURIComponent(h)}&key=${YOUTUBE_API_KEY}`);
+      const j = await r.json();
+      const id = j.items?.[0]?.id || null;
+      if (id) { _ytChannelCache.set(handle, id); return id; }
+      // If the handle genuinely doesn't resolve, cache null (skip it).
+      if (!j.error) { _ytChannelCache.set(handle, null); return null; }
+    } catch { /* fall through to scrape */ }
+  }
   try {
     const r = await fetch(`https://www.youtube.com/${handle}`, {
       headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0) AppleWebKit/537.36' },
