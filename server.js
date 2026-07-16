@@ -1244,6 +1244,32 @@ function parseArticleFeed(xml, limit = 15) {
   return out;
 }
 
+// Fetch a page's og:image (HD, ~1200px) — RSS images are tiny (Lenta 420px,
+// Guardian 700px). Cached so each article is fetched at most once / 15 min.
+const _ogCache = new Map();
+async function ogImage(url) {
+  if (_ogCache.has(url)) return _ogCache.get(url);
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 5000);
+    const r = await fetch(url, {
+      signal: ac.signal,
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; Sigmacta/1.1)' },
+    });
+    clearTimeout(t);
+    const html = (await r.text()).slice(0, 60000); // og tags live in <head>
+    const m = html.match(/<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']/i)
+      || html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image["']/i);
+    const img = m ? m[1].replace(/&amp;/g, '&') : '';
+    if (_ogCache.size > 500) _ogCache.clear();
+    _ogCache.set(url, img);
+    return img;
+  } catch {
+    _ogCache.set(url, '');
+    return '';
+  }
+}
+
 app.get('/api/news', async (req, res) => {
   const lang = req.query.lang === 'ru' ? 'ru' : 'en';
   const key = `mix:${lang}`;
@@ -1278,6 +1304,12 @@ app.get('/api/news', async (req, res) => {
         }
       }
     }
+    // Upgrade each article to its HD og:image (1200px) in parallel; keep the
+    // small RSS image as fallback. Runs once per 15-min cache window.
+    await Promise.all(articles.map(async (a) => {
+      const og = await ogImage(a.link);
+      if (og) { a.thumb = a.image; a.image = og; }
+    }));
     // Shuffle videos from all channels together (newest first-ish).
     const videos = videoLists.flat();
     // Weave: a video every 4th card while videos remain.
