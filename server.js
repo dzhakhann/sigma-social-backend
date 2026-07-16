@@ -1370,7 +1370,10 @@ function parseArticleFeed(xml, limit = 15) {
     const parsed = new Date(rawDate);
     const date = isNaN(parsed) ? rawDate : parsed.toISOString();
     out.push({
-      id: Buffer.from(link).toString('base64').slice(0, 32),
+      // Unique per article. The old base64(link).slice(0,32) only captured the
+      // domain (first ~24 URL chars), so every article from one site shared an
+      // id — breaking read-tracking and the infinite feed's dedupe.
+      id: 'a_' + crypto.createHash('sha1').update(link).digest('hex').slice(0, 16),
       title, link, image, desc, source,
       date,
     });
@@ -1442,7 +1445,7 @@ app.get('/api/news', async (req, res) => {
     // Upgrade each article to its HD og:image (1200px) in parallel; keep the
     // small RSS image as fallback. Runs once per 15-min cache window. The pool
     // is capped — each og lookup is a page fetch.
-    let pool = articles.slice(0, 60);
+    let pool = articles.slice(0, 90);
     await Promise.all(pool.map(async (a) => {
       const og = await ogImage(a.link);
       if (og) { a.thumb = a.image; a.image = og; }
@@ -1460,13 +1463,13 @@ app.get('/api/news', async (req, res) => {
     // Weave: a video every 4th card while videos remain.
     const data = [];
     let vi = 0;
-    for (let i = 0; i < pool.length && data.length < 48; i++) {
+    for (let i = 0; i < pool.length && data.length < 90; i++) {
       data.push(pool[i]);
       if ((data.length + 1) % 4 === 0 && vi < videos.length) {
         data.push(videos[vi++]);
       }
     }
-    while (vi < videos.length && data.length < 48) data.push(videos[vi++]);
+    while (vi < videos.length && data.length < 90) data.push(videos[vi++]);
     if (_newsCache.size > 10) _newsCache.clear();
     _newsCache.set(key, { ts: Date.now(), data });
     res.json({ success: true, data });
