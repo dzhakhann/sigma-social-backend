@@ -479,7 +479,7 @@ app.post('/api/users/:userId/update', authRequired, async (req, res) => {
   const {
     username, bio, avatar_url, headline, about, location, work, website,
     education, birthday, first_name, last_name, middle_name, gender,
-    birthplace, relationship, skills, hidden_fields,
+    birthplace, relationship, skills, hidden_fields, fav_track,
   } = req.body;
   try {
     // Only update fields that were actually sent (partial updates supported).
@@ -502,6 +502,9 @@ app.post('/api/users/:userId/update', authRequired, async (req, res) => {
     if (relationship !== undefined) update.relationship = relationship;
     if (skills !== undefined) update.skills = skills;
     if (hidden_fields !== undefined) update.hidden_fields = hidden_fields;
+    // Favorite track (Telegram-style profile music): ONLY the Rhythm catalog
+    // link {url,title,artist,art,dur} — never an audio file. null clears it.
+    if (fav_track !== undefined) update.fav_track = fav_track;
     const { data, error } = await supabase.from('users').update(update).eq('id', req.params.userId).select();
     if (error) throw error;
     res.json({ success: true, data: data[0] });
