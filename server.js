@@ -1767,9 +1767,20 @@ app.put('/api/comments/:commentId', authRequired, async (req, res) => {
 
 // ─── STORIES ──────────────────────────────────────────────────────────────────
 
-app.get('/api/stories', async (req, res) => {
+// Instagram rule: you only see stories from people you FOLLOW (plus your own).
+// This used to return every story on the platform to anyone, unauthenticated.
+app.get('/api/stories', authRequired, async (req, res) => {
   try {
-    const { data: stories, error } = await supabase.from('stories').select('*').gt('expires_at', new Date().toISOString()).order('created_at', { ascending: false });
+    const me = req.userId;
+    const { data: follows } = await supabase
+      .from('follows').select('following_id').eq('follower_id', me);
+    const visible = (follows || []).map((f) => f.following_id);
+    visible.push(me); // always see your own
+    const { data: stories, error } = await supabase
+      .from('stories').select('*')
+      .in('user_id', visible)
+      .gt('expires_at', new Date().toISOString())
+      .order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all((stories || []).map(async (s) => {
       const { data: user } = await supabase.from('users').select('username, avatar_url').eq('id', s.user_id);
