@@ -1790,17 +1790,25 @@ app.get('/api/stories', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Accepts either an inline photo (image_base64) or a URL that the client has
+// already uploaded via /api/upload (used for video stories — a 60s clip is far
+// too big to ship as base64 JSON). Videos reuse the existing `image_url`
+// column: the media type is derived from the extension, so no schema change.
 app.post('/api/stories/upload', authRequired, async (req, res) => {
-  const { image_base64 } = req.body;
+  const { image_base64, media_url } = req.body;
   const user_id = req.userId;
   try {
-    const buffer = Buffer.from(image_base64, 'base64');
-    const fileName = `${user_id}_story_${Date.now()}.jpg`;
-    const { error: uploadError } = await supabase.storage.from('avatars').upload(fileName, buffer, { contentType: 'image/jpeg', upsert: true });
-    if (uploadError) throw uploadError;
-    const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(fileName);
+    let publicUrl = media_url;
+    if (!publicUrl) {
+      const buffer = Buffer.from(image_base64, 'base64');
+      const fileName = `${user_id}_story_${Date.now()}.jpg`;
+      const { error: uploadError } = await supabase.storage.from('avatars').upload(fileName, buffer, { contentType: 'image/jpeg', upsert: true });
+      if (uploadError) throw uploadError;
+      const { data: urlData } = supabase.storage.from('avatars').getPublicUrl(fileName);
+      publicUrl = urlData.publicUrl;
+    }
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
-    const { data, error } = await supabase.from('stories').insert([{ user_id, image_url: urlData.publicUrl, expires_at: expiresAt }]).select().single();
+    const { data, error } = await supabase.from('stories').insert([{ user_id, image_url: publicUrl, expires_at: expiresAt }]).select().single();
     if (error) throw error;
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
