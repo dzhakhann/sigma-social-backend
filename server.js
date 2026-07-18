@@ -1658,9 +1658,11 @@ app.post('/api/posts/:postId/repost', authRequired, async (req, res) => {
 
 app.post('/api/posts', authRequired, async (req, res) => {
   const user_id = req.userId;
-  const { content, image_url } = req.body;
+  const { content, image_url, music } = req.body;
   try {
-    const { data, error } = await supabase.from('posts').insert([{ user_id, content: content || '', image_url: image_url || null, likes_count: 0 }]).select().single();
+    // music: ONLY a Rhythm catalog reference {url,title,artist,art} — audio
+    // files are never uploaded or copied per post.
+    const { data, error } = await supabase.from('posts').insert([{ user_id, content: content || '', image_url: image_url || null, music: music || null, likes_count: 0 }]).select().single();
     if (error) throw error;
     awardAura(user_id, 10); // publishing a post
     res.json({ success: true, data });
