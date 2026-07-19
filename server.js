@@ -953,35 +953,74 @@ app.get('/api/podcast/search', async (req, res) => {
 // Audiobooks — LibriVox catalog (public domain, free for commercial apps).
 // Each book maps to the same "show" shape as podcasts, so the existing
 // episodes screen (RSS parser) plays the chapters.
+// LibriVox is slow (multi-second) and has no CDN — so we cache every query for
+// an hour and serve stale results if a later refresh times out. This turns the
+// "spins forever / never loads" audiobook tab into an instant one.
+const _audiobookCache = new Map(); // key -> { data, exp }
+const AUDIOBOOK_TTL = 60 * 60 * 1000; // 1h
+
+async function fetchAudiobooks(term, genre, language) {
+  const key = `${term}|${genre}|${language}`;
+  const now = Date.now();
+  const hit = _audiobookCache.get(key);
+  if (hit && hit.exp > now) return hit.data;
+
+  let base = 'https://librivox.org/api/feed/audiobooks/?format=json&extended=1&limit=40';
+  if (genre) base += `&genre=${encodeURIComponent(genre)}`;
+  if (language) base += `&language=${encodeURIComponent(language)}`;
+  const url = term
+    ? `${base}&title=${encodeURIComponent(term)}`
+    : `${base}&sort_order=id`;
+  const r = await fetch(url, {
+    headers: { 'User-Agent': 'Sigmacta/1.0' },
+    signal: AbortSignal.timeout(12000), // never hang the request
+  });
+  const j = await r.json();
+  let data = (j.books || [])
+    .map((b) => ({
+      title: b.title || 'Audiobook',
+      artist: (b.authors || [])
+        .map((a) => `${a.first_name || ''} ${a.last_name || ''}`.trim())
+        .filter(Boolean)
+        .join(', '),
+      artwork: b.coverart_jpg || b.coverart_thumbnail || '',
+      feedUrl: b.url_rss || '',
+      genre: b.language || '',
+      duration: b.totaltime || '',
+    }))
+    .filter((b) => b.feedUrl);
+  // LibriVox's own language filter is unreliable — filter client-side too, but
+  // fall back to the unfiltered set so the tab is never empty.
+  if (language) {
+    const lang = language.toLowerCase();
+    const only = data.filter((b) => (b.genre || '').toLowerCase() === lang);
+    if (only.length) data = only;
+  }
+  _audiobookCache.set(key, { data, exp: now + AUDIOBOOK_TTL });
+  return data;
+}
+
 app.get('/api/audiobooks/search', async (req, res) => {
   const term = (req.query.term || '').toString().trim();
   const genre = (req.query.genre || '').toString().trim();
   const language = (req.query.language || '').toString().trim();
   try {
-    let base = 'https://librivox.org/api/feed/audiobooks/?format=json&extended=1&limit=40';
-    if (genre) base += `&genre=${encodeURIComponent(genre)}`;
-    if (language) base += `&language=${encodeURIComponent(language)}`;
-    const url = term
-      ? `${base}&title=${encodeURIComponent(term)}`
-      : `${base}&sort_order=id`;
-    const r = await fetch(url, { headers: { 'User-Agent': 'Sigmacta/1.0' } });
-    const j = await r.json();
-    const data = (j.books || [])
-      .map((b) => ({
-        title: b.title || 'Audiobook',
-        artist: (b.authors || [])
-          .map((a) => `${a.first_name || ''} ${a.last_name || ''}`.trim())
-          .filter(Boolean)
-          .join(', '),
-        artwork: b.coverart_jpg || b.coverart_thumbnail || '',
-        feedUrl: b.url_rss || '',
-        genre: b.language || '',
-        duration: b.totaltime || '',
-      }))
-      .filter((b) => b.feedUrl);
+    const data = await fetchAudiobooks(term, genre, language);
     res.json({ success: true, data });
-  } catch (e) { res.json({ success: false, error: e.message }); }
+  } catch (e) {
+    // On a timeout/error serve any cached copy rather than an empty list.
+    const stale = _audiobookCache.get(`${term}|${genre}|${language}`);
+    if (stale) return res.json({ success: true, data: stale.data });
+    res.json({ success: false, error: e.message });
+  }
 });
+
+// Warm the default catalogs on boot so the first open is instant.
+setTimeout(() => {
+  for (const lang of ['English', 'Russian']) {
+    fetchAudiobooks('', '', lang).catch(() => {});
+  }
+}, 4000);
 
 app.get('/api/podcast/episodes', async (req, res) => {
   const feed = (req.query.feed || '').toString();
