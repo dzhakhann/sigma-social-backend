@@ -2288,6 +2288,33 @@ app.post('/api/messages', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// Device-stored chat history (WhatsApp model — экономия базы): the server
+// keeps a message row ONLY until the recipient's phone confirms receipt.
+// The recipient stores it locally and ACKs → the row is deleted from the DB.
+// The chats table (list + last_message preview) stays, so a fresh phone sees
+// its chat list — with empty histories, exactly as designed.
+app.post('/api/messages/ack', authRequired, async (req, res) => {
+  const { chat_id, ids } = req.body;
+  try {
+    const { data: chat } = await supabase.from('chats').select('user1_id, user2_id').eq('id', chat_id);
+    if (!chat || chat.length === 0) return res.json({ success: false, error: 'Chat not found' });
+    if (chat[0].user1_id !== req.userId && chat[0].user2_id !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    const list = (Array.isArray(ids) ? ids : []).slice(0, 500);
+    if (!list.length) return res.json({ success: true });
+    // Only messages FROM the other side can be acked away — my own queued
+    // messages must survive until THEIR phone confirms.
+    const { error } = await supabase.from('messages').delete()
+      .eq('chat_id', chat_id).in('id', list).neq('sender_id', req.userId);
+    if (error) throw error;
+    const other = chat[0].user1_id === req.userId ? chat[0].user2_id : chat[0].user1_id;
+    // Delivered-and-read receipt for the sender's ✓✓ (their copy is local).
+    emitToUser(other, 'messages_read', { chatId: chat_id, reader: req.userId, ids: list });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 app.delete('/api/messages/:messageId', authRequired, async (req, res) => {
   try {
     const { data: m } = await supabase.from('messages').select('sender_id').eq('id', req.params.messageId);
