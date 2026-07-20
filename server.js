@@ -880,13 +880,16 @@ app.get('/api/ai/horoscope', authRequired, async (req, res) => {
 // ─── GIF SEARCH (Giphy proxy — key stays on the server) ───────────────────────
 // Tenor was shut down by Google on 2026-06-30, so we use Giphy instead.
 const GIPHY_KEY = process.env.GIPHY_API_KEY || '';
+// kind=stickers serves Giphy's sticker catalog (transparent GIFs) — used by
+// the chat sticker tab; default kind serves plain GIFs.
 app.get('/api/gifs', async (req, res) => {
   const q = (req.query.q || '').toString().trim();
+  const type = req.query.kind === 'stickers' ? 'stickers' : 'gifs';
   if (!GIPHY_KEY) return res.json({ success: true, data: [] });
   try {
     const url = q
-      ? `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(q)}&limit=24&rating=pg-13&bundle=fixed_width_downsampled`
-      : `https://api.giphy.com/v1/gifs/trending?api_key=${GIPHY_KEY}&limit=24&rating=pg-13&bundle=fixed_width_downsampled`;
+      ? `https://api.giphy.com/v1/${type}/search?api_key=${GIPHY_KEY}&q=${encodeURIComponent(q)}&limit=24&rating=pg-13&bundle=fixed_width_downsampled`
+      : `https://api.giphy.com/v1/${type}/trending?api_key=${GIPHY_KEY}&limit=24&rating=pg-13&bundle=fixed_width_downsampled`;
     const r = await fetch(url);
     const j = await r.json();
     const gifs = (j.data || []).map((g) => ({
@@ -2246,7 +2249,10 @@ app.get('/api/messages/:chatId', authRequired, async (req, res) => {
       .eq('chat_id', req.params.chatId)
       .neq('sender_id', req.userId)
       .eq('is_read', false);
-    io.emit('messages_read', { chatId: req.params.chatId, reader: req.userId });
+    // Only the two participants care — never broadcast chat events app-wide.
+    for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
+      emitToUser(uid, 'messages_read', { chatId: req.params.chatId, reader: req.userId });
+    }
     const { data, error } = await supabase.from('messages').select('*').eq('chat_id', req.params.chatId).order('created_at', { ascending: true });
     if (error) throw error;
     res.json({ success: true, data: data || [] });
@@ -2269,8 +2275,15 @@ app.post('/api/messages', authRequired, async (req, res) => {
       media_url: media_url || null
     }]).select().single();
     if (error) throw error;
-    await supabase.from('chats').update({ last_message: content }).eq('id', chat_id);
-    io.emit('receive_message', data);
+    // Chat-list previews for media messages (content is empty/для voice —
+    // its duration): show a label instead of a blank line.
+    const previews = { image: '📷 Photo', video: '🎥 Video', voice: '🎤 Voice', gif: 'GIF', sticker: '💟 Sticker' };
+    const last = previews[message_type] || content || '';
+    await supabase.from('chats').update({ last_message: last }).eq('id', chat_id);
+    // Deliver to the two participants only (was a global broadcast).
+    for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
+      emitToUser(uid, 'receive_message', data);
+    }
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
