@@ -950,14 +950,17 @@ app.get('/api/podcast/search', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
-// Audiobooks — LibriVox catalog (public domain, free for commercial apps).
-// Each book maps to the same "show" shape as podcasts, so the existing
-// episodes screen (RSS parser) plays the chapters.
-// LibriVox is slow (multi-second) and has no CDN — so we cache every query for
-// an hour and serve stale results if a later refresh times out. This turns the
-// "spins forever / never loads" audiobook tab into an instant one.
+// Audiobooks — the LibriVox collection on archive.org (public domain, free
+// for commercial apps). The old librivox.org API only did EXACT title matches
+// ("sherlock" → nothing), had empty cover art and no CDN. Archive.org's search
+// does real substring search, serves art from a CDN and answers in <1s.
+// A book's "feedUrl" is `archive:{identifier}`; /api/podcast/episodes resolves
+// it via the archive metadata API (plain librivox.org RSS urls saved in old
+// favourites still work through the RSS path).
 const _audiobookCache = new Map(); // key -> { data, exp }
 const AUDIOBOOK_TTL = 60 * 60 * 1000; // 1h
+
+const AB_LANG = { english: 'eng', russian: 'rus', german: 'ger', french: 'fre', spanish: 'spa', italian: 'ita' };
 
 async function fetchAudiobooks(term, genre, language) {
   const key = `${term}|${genre}|${language}`;
@@ -965,39 +968,67 @@ async function fetchAudiobooks(term, genre, language) {
   const hit = _audiobookCache.get(key);
   if (hit && hit.exp > now) return hit.data;
 
-  let base = 'https://librivox.org/api/feed/audiobooks/?format=json&extended=1&limit=40';
-  if (genre) base += `&genre=${encodeURIComponent(genre)}`;
-  if (language) base += `&language=${encodeURIComponent(language)}`;
-  const url = term
-    ? `${base}&title=${encodeURIComponent(term)}`
-    : `${base}&sort_order=id`;
+  let q = 'collection:librivoxaudio';
+  if (term) q += ` AND title:(${term.replace(/[^\p{L}\p{N} ]/gu, ' ').trim()})`;
+  if (genre) q += ` AND subject:(${genre.replace(/[^\p{L}\p{N} ]/gu, ' ').trim()})`;
+  const lang = AB_LANG[(language || '').toLowerCase()];
+  // Only pin the language for the default catalog — a typed search should
+  // find any book regardless of the app language.
+  if (lang && !term) q += ` AND language:(${lang})`;
+  const url = 'https://archive.org/advancedsearch.php?q=' + encodeURIComponent(q)
+    + '&fl[]=identifier&fl[]=title&fl[]=creator&fl[]=runtime&fl[]=language'
+    + '&rows=40&page=1&output=json'
+    + (term ? '' : '&sort[]=' + encodeURIComponent('downloads desc'));
   const r = await fetch(url, {
     headers: { 'User-Agent': 'Sigmacta/1.0' },
     signal: AbortSignal.timeout(12000), // never hang the request
   });
   const j = await r.json();
-  let data = (j.books || [])
+  const data = ((j.response || {}).docs || [])
     .map((b) => ({
-      title: b.title || 'Audiobook',
-      artist: (b.authors || [])
-        .map((a) => `${a.first_name || ''} ${a.last_name || ''}`.trim())
-        .filter(Boolean)
-        .join(', '),
-      artwork: b.coverart_jpg || b.coverart_thumbnail || '',
-      feedUrl: b.url_rss || '',
-      genre: b.language || '',
-      duration: b.totaltime || '',
+      title: (Array.isArray(b.title) ? b.title[0] : b.title) || 'Audiobook',
+      artist: (Array.isArray(b.creator) ? b.creator.join(', ') : b.creator) || 'LibriVox',
+      artwork: `https://archive.org/services/img/${b.identifier}`,
+      feedUrl: `archive:${b.identifier}`,
+      genre: (Array.isArray(b.language) ? b.language[0] : b.language) || '',
+      duration: (Array.isArray(b.runtime) ? b.runtime[0] : b.runtime) || '',
     }))
-    .filter((b) => b.feedUrl);
-  // LibriVox's own language filter is unreliable — filter client-side too, but
-  // fall back to the unfiltered set so the tab is never empty.
-  if (language) {
-    const lang = language.toLowerCase();
-    const only = data.filter((b) => (b.genre || '').toLowerCase() === lang);
-    if (only.length) data = only;
-  }
+    .filter((b) => b.feedUrl !== 'archive:undefined');
   _audiobookCache.set(key, { data, exp: now + AUDIOBOOK_TTL });
   return data;
+}
+
+// Chapters of an archive.org audiobook, shaped exactly like RSS episodes.
+// Prefers the 64kbps MP3 copy (lighter for mobile streaming); falls back to
+// the VBR original when a chapter has no 64kb version.
+async function archiveEpisodes(identifier) {
+  const r = await fetch(`https://archive.org/metadata/${encodeURIComponent(identifier)}`, {
+    headers: { 'User-Agent': 'Sigmacta/1.0' },
+    signal: AbortSignal.timeout(12000),
+  });
+  const j = await r.json();
+  const files = (j.files || []).filter((f) => (f.name || '').endsWith('.mp3'));
+  const fmtLen = (len) => {
+    if (!len) return '';
+    if (String(len).includes(':')) return String(len);
+    const s = Math.round(parseFloat(len)) || 0;
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  };
+  const byChapter = new Map(); // base name → file (64kb preferred)
+  for (const f of files) {
+    const base = f.name.replace(/_64kb\.mp3$/, '.mp3');
+    const prev = byChapter.get(base);
+    if (!prev || f.name.endsWith('_64kb.mp3')) byChapter.set(base, f);
+  }
+  const track = (f) => parseInt(String(f.track || '').split('/')[0], 10) || 0;
+  return [...byChapter.entries()]
+    .sort((a, b) => (track(a[1]) - track(b[1])) || a[0].localeCompare(b[0]))
+    .map(([, f]) => ({
+      title: f.title || f.name.replace(/\.mp3$/, ''),
+      audio: `https://archive.org/download/${identifier}/${encodeURIComponent(f.name)}`,
+      date: '',
+      duration: fmtLen(f.length),
+    }));
 }
 
 app.get('/api/audiobooks/search', async (req, res) => {
@@ -1024,6 +1055,13 @@ setTimeout(() => {
 
 app.get('/api/podcast/episodes', async (req, res) => {
   const feed = (req.query.feed || '').toString();
+  // Audiobook chapters live on archive.org — resolved via its metadata API.
+  if (feed.startsWith('archive:')) {
+    try {
+      const data = await archiveEpisodes(feed.slice('archive:'.length));
+      return res.json({ success: true, data });
+    } catch (e) { return res.json({ success: false, error: e.message }); }
+  }
   if (!/^https?:\/\//.test(feed)) return res.json({ success: false, error: 'bad feed' });
   try {
     const r = await fetch(feed, {
