@@ -2499,6 +2499,115 @@ app.delete('/api/admin/comments/:id', authRequired, adminOnly, async (req, res) 
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── SIGMA NEARBY (AirDrop-style profile exchange) ────────────────────────────
+// Both phones open the Nearby screen → each gets a short random token with a
+// short TTL and advertises it over BLE/Nearby Connections. When phone A sees
+// phone B's token it calls /nearby/connect — the server verifies BOTH sides
+// have an active session (nobody can be discovered without opening the
+// screen), makes the follow mutual, awards Aura, notifies both and pushes
+// 'nearby_connected' to the other phone over the socket. Tokens carry no user
+// data and rotate, so they cannot be replayed later.
+
+const _nearbyTokens = new Map(); // token -> { userId, exp }
+const _nearbyByUser = new Map(); // userId -> token
+const NEARBY_TTL = 120 * 1000;
+const NEARBY_FIELDS =
+  'id, username, avatar_url, bio, is_verified, followers_count, following_count';
+
+function nearbySession(userId) {
+  const t = _nearbyByUser.get(String(userId));
+  const s = t ? _nearbyTokens.get(t) : null;
+  return s && s.exp > Date.now() ? s : null;
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [t, s] of _nearbyTokens) {
+    if (s.exp < now) {
+      _nearbyTokens.delete(t);
+      if (_nearbyByUser.get(String(s.userId)) === t) _nearbyByUser.delete(String(s.userId));
+    }
+  }
+}, 60 * 1000);
+
+app.post('/api/nearby/start', authRequired, (req, res) => {
+  const old = _nearbyByUser.get(String(req.userId));
+  if (old) _nearbyTokens.delete(old);
+  const token = crypto.randomBytes(6).toString('base64url'); // 8 chars — fits a BLE name
+  _nearbyTokens.set(token, { userId: String(req.userId), exp: Date.now() + NEARBY_TTL });
+  _nearbyByUser.set(String(req.userId), token);
+  res.json({ success: true, data: { token, ttlMs: NEARBY_TTL } });
+});
+
+app.post('/api/nearby/stop', authRequired, (req, res) => {
+  const t = _nearbyByUser.get(String(req.userId));
+  if (t) _nearbyTokens.delete(t);
+  _nearbyByUser.delete(String(req.userId));
+  res.json({ success: true });
+});
+
+// Who is behind a discovered token — for the "several people nearby" list.
+// Needs an active session of your own, so profiles never leak outside the
+// Nearby screen.
+app.get('/api/nearby/peek', authRequired, async (req, res) => {
+  try {
+    if (!nearbySession(req.userId)) return res.json({ success: false, error: 'No active session' });
+    const s = _nearbyTokens.get((req.query.token || '').toString());
+    if (!s || s.exp < Date.now()) return res.json({ success: false, error: 'Expired' });
+    const { data, error } = await supabase.from('users').select(NEARBY_FIELDS).eq('id', s.userId).single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// One-way follow that is safe to repeat (used for the mutual exchange).
+async function followSilent(followerId, followingId) {
+  const { data: ex } = await supabase.from('follows')
+    .select('id').eq('follower_id', followerId).eq('following_id', followingId);
+  if (ex && ex.length > 0) return false;
+  await supabase.from('follows').insert([{ follower_id: followerId, following_id: followingId }]);
+  const { data: target } = await supabase.from('users').select('followers_count').eq('id', followingId);
+  const { data: current } = await supabase.from('users').select('following_count').eq('id', followerId);
+  if (target) await supabase.from('users').update({ followers_count: (target[0].followers_count || 0) + 1 }).eq('id', followingId);
+  if (current) await supabase.from('users').update({ following_count: (current[0].following_count || 0) + 1 }).eq('id', followerId);
+  return true;
+}
+
+function emitToUser(userId, event, payload) {
+  for (const [sid, uid] of onlineSockets) {
+    if (uid === String(userId)) io.to(sid).emit(event, payload);
+  }
+}
+
+app.post('/api/nearby/connect', authRequired, async (req, res) => {
+  try {
+    if (!nearbySession(req.userId)) return res.json({ success: false, error: 'No active session' });
+    const s = _nearbyTokens.get((req.body.token || '').toString());
+    if (!s || s.exp < Date.now()) return res.json({ success: false, error: 'Expired' });
+    const otherId = s.userId;
+    if (String(otherId) === String(req.userId)) return res.json({ success: false, error: 'Self' });
+
+    // Both phones usually discover each other and call this at the same time —
+    // followSilent makes the second call a no-op, so nothing double-counts.
+    const a = await followSilent(req.userId, otherId);
+    const b = await followSilent(otherId, req.userId);
+    const { data: profiles } = await supabase.from('users').select(NEARBY_FIELDS).in('id', [req.userId, otherId]);
+    const me = (profiles || []).find((p) => String(p.id) === String(req.userId));
+    const them = (profiles || []).find((p) => String(p.id) === String(otherId));
+    if (!them) return res.json({ success: false, error: 'User not found' });
+    if (a || b) { // first pairing only — Aura + notifications once
+      awardAura(req.userId, 5);
+      awardAura(otherId, 5);
+      createNotification(otherId, req.userId, 'follow',
+        `${me?.username || 'Someone'} connected with you nearby ⚡`);
+      createNotification(req.userId, otherId, 'follow',
+        `${them.username || 'Someone'} connected with you nearby ⚡`);
+    }
+    emitToUser(otherId, 'nearby_connected', { user: me });
+    res.json({ success: true, data: { user: them, newLink: a || b } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── WEBSOCKET + ONLINE PRESENCE ──────────────────────────────────────────────
 
 const onlineSockets = new Map(); // socket.id -> userId
