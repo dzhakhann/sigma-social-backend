@@ -2260,7 +2260,7 @@ app.get('/api/messages/:chatId', authRequired, async (req, res) => {
 });
 
 app.post('/api/messages', authRequired, async (req, res) => {
-  const { chat_id, content, message_type, media_url } = req.body;
+  const { chat_id, content, message_type, media_url, reply_to, forwarded_from } = req.body;
   const sender_id = req.userId;
   try {
     // The sender must be a participant of the chat.
@@ -2272,7 +2272,12 @@ app.post('/api/messages', authRequired, async (req, res) => {
     const { data, error } = await supabase.from('messages').insert([{
       chat_id, sender_id, content: content || '',
       message_type: message_type || 'text',
-      media_url: media_url || null
+      media_url: media_url || null,
+      // Both are self-contained SNAPSHOTS taken at send time (sender name,
+      // quoted text/thumbnail) — so they keep rendering correctly even after
+      // the quoted/original message is gone from the device-stored history.
+      reply_to: reply_to || null,
+      forwarded_from: forwarded_from || null,
     }]).select().single();
     if (error) throw error;
     // Chat-list previews for media messages (content is empty/для voice —
