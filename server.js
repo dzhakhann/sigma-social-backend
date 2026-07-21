@@ -2269,16 +2269,22 @@ app.post('/api/messages', authRequired, async (req, res) => {
     if (chat[0].user1_id !== sender_id && chat[0].user2_id !== sender_id) {
       return res.status(403).json({ success: false, error: 'Forbidden' });
     }
-    const { data, error } = await supabase.from('messages').insert([{
+    const base = {
       chat_id, sender_id, content: content || '',
       message_type: message_type || 'text',
       media_url: media_url || null,
-      // Both are self-contained SNAPSHOTS taken at send time (sender name,
-      // quoted text/thumbnail) — so they keep rendering correctly even after
-      // the quoted/original message is gone from the device-stored history.
-      reply_to: reply_to || null,
-      forwarded_from: forwarded_from || null,
-    }]).select().single();
+    };
+    // Both are self-contained SNAPSHOTS taken at send time (sender name,
+    // quoted text/thumbnail) — so they keep rendering correctly even after
+    // the quoted/original message is gone from the device-stored history.
+    let { data, error } = await supabase.from('messages')
+      .insert([{ ...base, reply_to: reply_to || null, forwarded_from: forwarded_from || null }])
+      .select().single();
+    // Migration not applied yet (see migrations/reply_forward.sql) — fall
+    // back to a plain send rather than breaking chat entirely.
+    if (error && /reply_to|forwarded_from/.test(error.message || '')) {
+      ({ data, error } = await supabase.from('messages').insert([base]).select().single());
+    }
     if (error) throw error;
     // Chat-list previews for media messages (content is empty/для voice —
     // its duration): show a label instead of a blank line.
