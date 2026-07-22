@@ -166,15 +166,23 @@ async function createNotification(userId, fromUserId, type, message, postId = nu
 // Bulk-notify every follower of `userId` (fire-and-forget from the caller —
 // publishing a post/story shouldn't wait on however many thousands of
 // followers someone has). ONE insert per batch instead of one per follower.
-async function notifyFollowers(userId, type, message) {
+async function notifyFollowers(userId, type, message, postId = null) {
   try {
     const { data: rows } = await supabase.from('follows').select('follower_id').eq('following_id', userId);
     const ids = (rows || []).map((r) => r.follower_id);
+    const { data: fromRows } = await supabase.from('users').select('username, avatar_url').eq('id', userId);
+    const from_username = fromRows?.[0]?.username;
+    const from_avatar = fromRows?.[0]?.avatar_url;
     for (let i = 0; i < ids.length; i += 500) {
       const batch = ids.slice(i, i + 500).map((follower_id) => ({
-        user_id: follower_id, from_user_id: userId, type, message, is_read: false,
+        user_id: follower_id, from_user_id: userId, type, message, post_id: postId, is_read: false,
       }));
-      await supabase.from('notifications').insert(batch);
+      // .select() so we get real ids/created_at back for the live socket push
+      // (in-app poll-free delivery) below — same targeted pattern as chat.
+      const { data: inserted } = await supabase.from('notifications').insert(batch).select();
+      for (const row of inserted || []) {
+        emitToUser(row.user_id, 'notification', { ...row, from_username, from_avatar });
+      }
     }
   } catch (_) {}
 }
@@ -1940,7 +1948,7 @@ app.post('/api/posts', authRequired, async (req, res) => {
     }
     if (error) throw error;
     awardAura(user_id, 10); // publishing a post
-    notifyFollowers(user_id, 'new_post', `${(await usernameMap([user_id]))[user_id] || 'Someone'} shared a new post`);
+    notifyFollowers(user_id, 'new_post', `${(await usernameMap([user_id]))[user_id] || 'Someone'} shared a new post`, data.id);
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
