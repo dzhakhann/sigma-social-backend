@@ -549,6 +549,71 @@ app.get('/api/users/:userId/following/:targetUserId', async (req, res) => {
   } catch (_) { res.json({ isFollowing: false }); }
 });
 
+// ─── NOTES (Instagram-style: short text, mutual follows only, 24h) ───────────
+// ONE note per user (a new note replaces the old one) — text only, no music,
+// per the user's explicit spec. Visible only to MUTUAL follows (you follow
+// them AND they follow you) — never a one-way follow, so a note can't leak
+// to someone who doesn't follow back. Expired rows are opportunistically
+// swept on every read/write instead of running a cron job.
+const NOTE_TTL_MS = 24 * 60 * 60 * 1000;
+const NOTE_MAX_LEN = 60;
+
+async function sweepExpiredNotes() {
+  try { await supabase.from('notes').delete().lt('expires_at', new Date().toISOString()); } catch (_) {}
+}
+
+app.post('/api/notes', authRequired, async (req, res) => {
+  const text = (req.body.text || '').toString().trim().slice(0, NOTE_MAX_LEN);
+  if (!text) return res.json({ success: false, error: 'Empty note' });
+  try {
+    await sweepExpiredNotes();
+    const expires_at = new Date(Date.now() + NOTE_TTL_MS).toISOString();
+    // One note per user — delete any existing one first (simpler than upsert
+    // across environments without a unique constraint already in place).
+    await supabase.from('notes').delete().eq('user_id', req.userId);
+    const { data, error } = await supabase.from('notes')
+      .insert([{ user_id: req.userId, text, expires_at }]).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/notes', authRequired, async (req, res) => {
+  try {
+    await supabase.from('notes').delete().eq('user_id', req.userId);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/notes', authRequired, async (req, res) => {
+  try {
+    await sweepExpiredNotes();
+    const me = req.userId;
+    const [{ data: iFollow }, { data: followMe }] = await Promise.all([
+      supabase.from('follows').select('following_id').eq('follower_id', me),
+      supabase.from('follows').select('follower_id').eq('following_id', me),
+    ]);
+    const followingSet = new Set((iFollow || []).map((r) => r.following_id));
+    const followerSet = new Set((followMe || []).map((r) => r.follower_id));
+    // Mutual = people I follow AND who follow me back — never a one-way follow.
+    const mutualIds = [...followingSet].filter((id) => followerSet.has(id));
+    const ids = [...new Set([me, ...mutualIds])];
+    const { data: notes, error } = await supabase.from('notes')
+      .select('*').in('user_id', ids).order('created_at', { ascending: false });
+    if (error) throw error;
+    const { data: users } = await supabase.from('users').select('id, username, avatar_url').in('id', ids);
+    const userMap = {};
+    (users || []).forEach((u) => { userMap[u.id] = u; });
+    const enriched = (notes || []).map((n) => ({
+      ...n,
+      username: userMap[n.user_id]?.username || 'User',
+      avatar_url: userMap[n.user_id]?.avatar_url || null,
+      is_mine: n.user_id === me,
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── SEARCH ───────────────────────────────────────────────────────────────────
 
 app.get('/api/search/users', async (req, res) => {
