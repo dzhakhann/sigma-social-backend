@@ -903,11 +903,57 @@ app.get('/api/gifs', async (req, res) => {
 
 // ─── LINK PREVIEW (Open Graph unfurl — Telegram-style) ────────────────────────
 const _linkCache = new Map();
+
+// YouTube's watch page doesn't unfurl reliably via plain OG-scraping — Google
+// serves datacenter-IP requests a stripped/consent page whose own <title> is
+// just the resolved URL text (no real og:title/og:image at all). The public
+// oEmbed endpoint sidesteps all of that: clean JSON, real title + thumbnail,
+// no auth, no bot-detection.
+function youtubeId(url) {
+  const m = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/|embed\/))([\w-]{11})/);
+  return m ? m[1] : null;
+}
+async function youtubeOembed(url) {
+  const r = await fetch(`https://www.youtube.com/oembed?url=${encodeURIComponent(url)}&format=json`,
+    { signal: AbortSignal.timeout(8000) });
+  if (!r.ok) return null;
+  const j = await r.json();
+  const id = youtubeId(url);
+  return {
+    title: j.title || '',
+    description: j.author_name ? `${j.author_name} · YouTube` : 'YouTube',
+    image: j.thumbnail_url || (id ? `https://i.ytimg.com/vi/${id}/hqdefault.jpg` : null),
+    siteName: 'YouTube',
+    url,
+  };
+}
+
 app.get('/api/link-preview', async (req, res) => {
   const url = (req.query.url || '').toString();
   if (!/^https?:\/\//.test(url)) return res.json({ success: false });
   if (_linkCache.has(url)) return res.json({ success: true, data: _linkCache.get(url) });
   try {
+    const host = new URL(url).hostname;
+    if (/(^|\.)youtube\.com$|(^|\.)youtu\.be$/.test(host)) {
+      const yt = await youtubeOembed(url).catch(() => null);
+      if (yt && yt.title) {
+        if (_linkCache.size > 500) _linkCache.clear();
+        _linkCache.set(url, yt);
+        return res.json({ success: true, data: yt });
+      }
+    }
+    // Instagram has no public oEmbed anymore and gates its real posts behind
+    // a login wall for unauthenticated/server-side requests — what comes
+    // back is inconsistent (sometimes the login page, sometimes the real
+    // post but with encoding issues from Instagram's own markup). Rather
+    // than show flaky/garbled scraped content, give it a clean, reliable
+    // branded card and let the app open the real thing.
+    if (/(^|\.)instagram\.com$/.test(host)) {
+      const data = { title: '', description: '', image: null, siteName: 'Instagram', url };
+      if (_linkCache.size > 500) _linkCache.clear();
+      _linkCache.set(url, data);
+      return res.json({ success: true, data });
+    }
     const r = await fetch(url, {
       headers: { 'User-Agent': 'Mozilla/5.0 (compatible; SigmactaBot/1.0; +https://sigmacta.app)' },
       redirect: 'follow',
@@ -918,13 +964,20 @@ app.get('/api/link-preview', async (req, res) => {
       const b = html.match(new RegExp(`<meta[^>]+content=["']([^"']*)["'][^>]+(?:property|name)=["']${prop}["']`, 'i'));
       return (a && a[1]) || (b && b[1]) || null;
     };
-    const dec = (s) => s ? s.replace(/&amp;/g, '&').replace(/&quot;/g, '"')
-      .replace(/&#0?39;/g, "'").replace(/&#x27;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>') : s;
+    // Instagram (and others) encode almost everything non-ASCII as numeric
+    // character references — e.g. Cyrillic "Дора" as `&#x414;&#x43e;...` and
+    // even a plain "@" as `&#064;`. The old decoder only handled a handful of
+    // named entities, so real captions/titles showed up as raw entity codes.
+    const dec = (s) => s ? s
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(parseInt(d, 10)))
+      .replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&nbsp;/g, ' ')
+      .replace(/&lt;/g, '<').replace(/&gt;/g, '>') : s;
     const data = {
       title: dec(pick('og:title') || (html.match(/<title>([^<]*)<\/title>/i) || [])[1] || ''),
       description: dec(pick('og:description') || pick('description') || ''),
       image: dec(pick('og:image') || pick('twitter:image')),
-      siteName: dec(pick('og:site_name')) || (() => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } })(),
+      siteName: dec(pick('og:site_name')) || host.replace(/^www\./, ''),
       url,
     };
     if (_linkCache.size > 500) _linkCache.clear();
@@ -2209,7 +2262,17 @@ app.post('/api/reels/:reelId/like', authRequired, async (req, res) => {
 app.get('/api/chats', authRequired, async (req, res) => {
   const userId = req.userId;
   try {
-    const { data: chats, error } = await supabase.from('chats').select('*').or(`user1_id.eq.${userId},user2_id.eq.${userId}`);
+    // Most-recently-active chat first (Telegram-style) — was unordered, so
+    // chats came back in arbitrary/insertion order and jumped around.
+    let { data: chats, error } = await supabase.from('chats').select('*')
+      .or(`user1_id.eq.${userId},user2_id.eq.${userId}`)
+      .order('updated_at', { ascending: false, nullsFirst: false });
+    // Migration not applied yet (see migrations/chats_updated_at.sql) — fall
+    // back to unordered rather than breaking the whole chat list.
+    if (error && /updated_at/.test(error.message || '')) {
+      ({ data: chats, error } = await supabase.from('chats').select('*')
+        .or(`user1_id.eq.${userId},user2_id.eq.${userId}`));
+    }
     if (error) throw error;
     const enriched = await Promise.all((chats || []).map(async (chat) => {
       const otherId = chat.user1_id === userId ? chat.user2_id : chat.user1_id;
@@ -2290,7 +2353,7 @@ app.post('/api/messages', authRequired, async (req, res) => {
     // its duration): show a label instead of a blank line.
     const previews = { image: '📷 Photo', video: '🎥 Video', voice: '🎤 Voice', gif: 'GIF', sticker: '💟 Sticker' };
     const last = previews[message_type] || content || '';
-    await supabase.from('chats').update({ last_message: last }).eq('id', chat_id);
+    await supabase.from('chats').update({ last_message: last, updated_at: new Date().toISOString() }).eq('id', chat_id);
     // Deliver to the two participants only (was a global broadcast).
     for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
       emitToUser(uid, 'receive_message', data);
