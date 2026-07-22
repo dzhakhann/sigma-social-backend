@@ -2639,12 +2639,16 @@ app.get('/api/groups/:id/messages', authRequired, async (req, res) => {
     if (!role) return res.status(403).json({ success: false, error: 'Not a member' });
     // Only rows still queued FOR ME (I haven't acked them yet) — mirrors the
     // 1:1 "server only holds the undelivered queue" model.
+    // NOTE: supabase-js's .contains() serialises array values using Postgres
+    // NATIVE-array {..} syntax regardless of column type, which Postgres then
+    // fails to parse as JSON for a jsonb column ("invalid input syntax for
+    // type json") — so pending_acks membership is filtered in JS instead.
     const { data, error } = await supabase.from('group_messages').select('*')
       .eq('group_id', req.params.id)
-      .contains('pending_acks', [req.userId])
       .order('created_at', { ascending: true });
     if (error) throw error;
-    res.json({ success: true, data: data || [] });
+    const mine = (data || []).filter((m) => (m.pending_acks || []).includes(req.userId));
+    res.json({ success: true, data: mine });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
