@@ -163,6 +163,22 @@ async function createNotification(userId, fromUserId, type, message, postId = nu
 }
 
 // ─── AURA: user activity score (gamification). Small increments per action. ────
+// Bulk-notify every follower of `userId` (fire-and-forget from the caller —
+// publishing a post/story shouldn't wait on however many thousands of
+// followers someone has). ONE insert per batch instead of one per follower.
+async function notifyFollowers(userId, type, message) {
+  try {
+    const { data: rows } = await supabase.from('follows').select('follower_id').eq('following_id', userId);
+    const ids = (rows || []).map((r) => r.follower_id);
+    for (let i = 0; i < ids.length; i += 500) {
+      const batch = ids.slice(i, i + 500).map((follower_id) => ({
+        user_id: follower_id, from_user_id: userId, type, message, is_read: false,
+      }));
+      await supabase.from('notifications').insert(batch);
+    }
+  } catch (_) {}
+}
+
 async function awardAura(userId, amount) {
   if (!userId || !amount) return;
   try {
@@ -539,6 +555,53 @@ app.post('/api/users/:userId/unfollow/:targetUserId', authRequired, async (req, 
     if (target) await supabase.from('users').update({ followers_count: Math.max(0, (target[0].followers_count || 1) - 1) }).eq('id', targetUserId);
     if (current) await supabase.from('users').update({ following_count: Math.max(0, (current[0].following_count || 1) - 1) }).eq('id', userId);
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── FOLLOWERS / FOLLOWING LISTS (Instagram-style) ────────────────────────────
+async function followList(column, otherColumn, targetUserId, callerId, limit, offset) {
+  const { data: rows, error } = await supabase.from('follows')
+    .select(`${column}, created_at`).eq(otherColumn, targetUserId)
+    .order('created_at', { ascending: false }).range(offset, offset + limit - 1);
+  if (error) throw error;
+  const ids = rows.map((r) => r[column]);
+  if (!ids.length) return [];
+  const { data: users } = await supabase.from('users')
+    .select('id, username, avatar_url, bio, is_verified').in('id', ids);
+  const userMap = {};
+  (users || []).forEach((u) => { userMap[u.id] = u; });
+  // Does the CALLER follow each of these people? (drives the Follow/Following
+  // button state, like Instagram's own followers/following screens).
+  const { data: mine } = await supabase.from('follows').select('following_id')
+    .eq('follower_id', callerId).in('following_id', ids);
+  const iFollow = new Set((mine || []).map((r) => r.following_id));
+  return ids.map((id) => ({
+    ...(userMap[id] || { id }),
+    is_following: iFollow.has(id),
+    is_me: id === callerId,
+  })).filter((u) => u.username); // drop any dangling ids (deleted users)
+}
+
+app.get('/api/users/:userId/followers', authRequired, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 40, 100);
+    const offset = parseInt(req.query.offset, 10) || 0;
+    // followers of :userId = rows where following_id = :userId, follower_id is the follower
+    const data = await followList('follower_id', 'following_id', req.params.userId, req.userId, limit, offset);
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// NOTE: this is a different path SHAPE than the existing boolean-check route
+// below (`/following/:targetUserId`, two segments) — Express distinguishes
+// them by segment count, no collision.
+app.get('/api/users/:userId/following', authRequired, async (req, res) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit, 10) || 40, 100);
+    const offset = parseInt(req.query.offset, 10) || 0;
+    // people :userId follows = rows where follower_id = :userId
+    const data = await followList('following_id', 'follower_id', req.params.userId, req.userId, limit, offset);
+    res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -1856,13 +1919,28 @@ app.post('/api/posts/:postId/repost', authRequired, async (req, res) => {
 
 app.post('/api/posts', authRequired, async (req, res) => {
   const user_id = req.userId;
-  const { content, image_url, music } = req.body;
+  const { content, image_url, music, media_urls } = req.body;
   try {
     // music: ONLY a Rhythm catalog reference {url,title,artist,art} — audio
     // files are never uploaded or copied per post.
-    const { data, error } = await supabase.from('posts').insert([{ user_id, content: content || '', image_url: image_url || null, music: music || null, likes_count: 0 }]).select().single();
+    // media_urls: full photo carousel (Instagram-style, "1/N" swipe) — image_url
+    // stays the first photo so every OLDER client (feed thumbnails, admin,
+    // notifications) that only knows about a single image keeps working.
+    const carousel = Array.isArray(media_urls) && media_urls.length > 0 ? media_urls : null;
+    const base = {
+      user_id, content: content || '',
+      image_url: carousel ? carousel[0] : (image_url || null),
+      music: music || null, likes_count: 0,
+    };
+    let { data, error } = await supabase.from('posts').insert([{ ...base, media_urls: carousel }]).select().single();
+    // Migration not applied yet (see migrations/post_media_urls.sql) — fall
+    // back to a single-image post rather than breaking publishing entirely.
+    if (error && /media_urls/.test(error.message || '')) {
+      ({ data, error } = await supabase.from('posts').insert([base]).select().single());
+    }
     if (error) throw error;
     awardAura(user_id, 10); // publishing a post
+    notifyFollowers(user_id, 'new_post', `${(await usernameMap([user_id]))[user_id] || 'Someone'} shared a new post`);
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -2013,6 +2091,7 @@ app.post('/api/stories/upload', authRequired, async (req, res) => {
     const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
     const { data, error } = await supabase.from('stories').insert([{ user_id, image_url: publicUrl, expires_at: expiresAt }]).select().single();
     if (error) throw error;
+    notifyFollowers(user_id, 'new_story', `${(await usernameMap([user_id]))[user_id] || 'Someone'} posted a new story`);
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -2358,6 +2437,23 @@ app.post('/api/chats/get-or-create', authRequired, async (req, res) => {
     const { data, error } = await supabase.from('chats').insert([{ user1_id, user2_id }]).select().single();
     if (error) throw error;
     res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Delete a chat (Telegram-style "Delete chat" from the ⋮ menu) — removes it
+// from the SERVER (both participants' lists, and any still-queued undelivered
+// messages). History itself is device-stored and untouched by this; the app
+// clears its own local copy separately when the user picks this action.
+app.delete('/api/chats/:chatId', authRequired, async (req, res) => {
+  try {
+    const { data: chat } = await supabase.from('chats').select('user1_id, user2_id').eq('id', req.params.chatId);
+    if (!chat || chat.length === 0) return res.json({ success: true }); // already gone
+    if (chat[0].user1_id !== req.userId && chat[0].user2_id !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    await supabase.from('messages').delete().eq('chat_id', req.params.chatId);
+    await supabase.from('chats').delete().eq('id', req.params.chatId);
+    res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
