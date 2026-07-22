@@ -11,6 +11,8 @@ import { createServer } from 'http';
 import { Server } from 'socket.io';
 import { RECOVERY_WORDS } from './wordlist.js';
 import { runBots } from './bots.js';
+import { initializeApp as initFirebaseApp, cert as firebaseCert } from 'firebase-admin/app';
+import { getMessaging } from 'firebase-admin/messaging';
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -129,6 +131,49 @@ if (!SUPABASE_KEY) {
 }
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
 
+// ─── FIREBASE CLOUD MESSAGING (optional) ────────────────────────────────────
+// Wakes a killed/backgrounded app with a real push, on top of the live socket
+// push (emitToUser) which only reaches an app process that's still alive.
+// Entirely opt-in: until FIREBASE_SERVICE_ACCOUNT_JSON is set in the
+// environment, `fcmMessaging` stays null and every send below is a no-op —
+// the rest of the notification system (DB row + socket push) is unaffected.
+let fcmMessaging = null;
+try {
+  if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+    const fbApp = initFirebaseApp({
+      credential: firebaseCert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)),
+    });
+    fcmMessaging = getMessaging(fbApp);
+    console.log('✅ Firebase Cloud Messaging configured');
+  } else {
+    console.log('ℹ️  FIREBASE_SERVICE_ACCOUNT_JSON not set — FCM push disabled (socket push still works)');
+  }
+} catch (e) {
+  console.error('❌ Firebase Admin init failed, FCM push disabled:', e.message);
+}
+
+// Best-effort push to one device token. Clears the stored token if Firebase
+// reports it as dead, so we stop retrying a device that will never receive it.
+async function sendFcm(userId, fcmToken, data) {
+  if (!fcmMessaging || !fcmToken) return;
+  try {
+    // Data-only message: the client always renders it itself (via the same
+    // NotificationService used for the live socket push), so a killed-app
+    // push and a foreground socket push end up looking identical.
+    await fcmMessaging.send({
+      token: fcmToken,
+      data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v ?? '')])),
+      android: { priority: 'high' },
+    });
+  } catch (e) {
+    if (e.code === 'messaging/registration-token-not-registered' || e.code === 'messaging/invalid-registration-token') {
+      await supabase.from('users').update({ fcm_token: null }).eq('id', userId).eq('fcm_token', fcmToken);
+    } else {
+      console.error('[fcm] send failed', e.code || e.message);
+    }
+  }
+}
+
 // ─── RATE LIMITING ──────────────────────────────────────────────────────────
 // Protects against brute-forcing passwords / recovery phrases and upload abuse.
 const WINDOW = parseInt(process.env.RATE_LIMIT_WINDOW || '900000', 10); // 15 min
@@ -155,10 +200,19 @@ app.use('/api/upload', uploadLimiter);
 async function createNotification(userId, fromUserId, type, message, postId = null) {
   if (!userId || userId === fromUserId) return;
   try {
-    await supabase.from('notifications').insert([{
+    const { data } = await supabase.from('notifications').insert([{
       user_id: userId, from_user_id: fromUserId,
       type, message, post_id: postId, is_read: false
-    }]);
+    }]).select().single();
+    if (!data) return;
+    const { data: fromRows } = await supabase.from('users').select('username, avatar_url').eq('id', fromUserId);
+    const from_username = fromRows?.[0]?.username;
+    const from_avatar = fromRows?.[0]?.avatar_url;
+    emitToUser(userId, 'notification', { ...data, from_username, from_avatar });
+    const { data: recipient } = await supabase.from('users').select('fcm_token').eq('id', userId);
+    if (recipient?.[0]?.fcm_token) {
+      sendFcm(userId, recipient[0].fcm_token, { type, message, post_id: postId, notif_id: data.id, from_user_id: fromUserId });
+    }
   } catch (_) {}
 }
 
@@ -174,14 +228,21 @@ async function notifyFollowers(userId, type, message, postId = null) {
     const from_username = fromRows?.[0]?.username;
     const from_avatar = fromRows?.[0]?.avatar_url;
     for (let i = 0; i < ids.length; i += 500) {
-      const batch = ids.slice(i, i + 500).map((follower_id) => ({
+      const slice = ids.slice(i, i + 500);
+      const batch = slice.map((follower_id) => ({
         user_id: follower_id, from_user_id: userId, type, message, post_id: postId, is_read: false,
       }));
       // .select() so we get real ids/created_at back for the live socket push
       // (in-app poll-free delivery) below — same targeted pattern as chat.
       const { data: inserted } = await supabase.from('notifications').insert(batch).select();
+      const { data: tokenRows } = await supabase.from('users').select('id, fcm_token').in('id', slice);
+      const tokenById = {};
+      (tokenRows || []).forEach((u) => { if (u.fcm_token) tokenById[u.id] = u.fcm_token; });
       for (const row of inserted || []) {
         emitToUser(row.user_id, 'notification', { ...row, from_username, from_avatar });
+        if (tokenById[row.user_id]) {
+          sendFcm(row.user_id, tokenById[row.user_id], { type, message, post_id: postId, notif_id: row.id, from_user_id: userId });
+        }
       }
     }
   } catch (_) {}
@@ -2339,6 +2400,19 @@ app.get('/api/notifications', authRequired, async (req, res) => {
       return { ...n, from_username: from?.[0]?.username, from_avatar: from?.[0]?.avatar_url };
     }));
     res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Registers this device's Firebase Cloud Messaging token so we can wake it
+// with a real push even if the app process is killed. Safe to call every
+// login — token can rotate, and re-saving the same one is a cheap no-op.
+app.post('/api/users/fcm-token', authRequired, async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.json({ success: false, error: 'token is required' });
+  try {
+    const { error } = await supabase.from('users').update({ fcm_token: token }).eq('id', req.userId);
+    if (error) throw error;
+    res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
