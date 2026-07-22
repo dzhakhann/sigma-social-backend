@@ -159,10 +159,17 @@ async function sendFcm(userId, fcmToken, data) {
   try {
     // Data-only message: the client always renders it itself (via the same
     // NotificationService used for the live socket push), so a killed-app
-    // push and a foreground socket push end up looking identical.
+    // push and a foreground socket push end up looking identical. Drop
+    // null/undefined entries entirely rather than stringifying them — the
+    // client checks e.g. `n['post_id'] != null`, and a coerced '' would
+    // read as "present" and break the post-vs-profile routing fallback.
+    const strData = {};
+    for (const [k, v] of Object.entries(data)) {
+      if (v !== null && v !== undefined) strData[k] = String(v);
+    }
     await fcmMessaging.send({
       token: fcmToken,
-      data: Object.fromEntries(Object.entries(data).map(([k, v]) => [k, String(v ?? '')])),
+      data: strData,
       android: { priority: 'high' },
     });
   } catch (e) {
@@ -211,7 +218,7 @@ async function createNotification(userId, fromUserId, type, message, postId = nu
     emitToUser(userId, 'notification', { ...data, from_username, from_avatar });
     const { data: recipient } = await supabase.from('users').select('fcm_token').eq('id', userId);
     if (recipient?.[0]?.fcm_token) {
-      sendFcm(userId, recipient[0].fcm_token, { type, message, post_id: postId, notif_id: data.id, from_user_id: fromUserId });
+      sendFcm(userId, recipient[0].fcm_token, { id: data.id, type, message, post_id: postId, from_user_id: fromUserId, from_username, from_avatar });
     }
   } catch (_) {}
 }
@@ -241,7 +248,7 @@ async function notifyFollowers(userId, type, message, postId = null) {
       for (const row of inserted || []) {
         emitToUser(row.user_id, 'notification', { ...row, from_username, from_avatar });
         if (tokenById[row.user_id]) {
-          sendFcm(row.user_id, tokenById[row.user_id], { type, message, post_id: postId, notif_id: row.id, from_user_id: userId });
+          sendFcm(row.user_id, tokenById[row.user_id], { id: row.id, type, message, post_id: postId, from_user_id: userId, from_username, from_avatar });
         }
       }
     }
