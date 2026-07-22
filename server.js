@@ -2477,6 +2477,228 @@ app.put('/api/messages/:messageId', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── GROUPS (Telegram-style open/closed group chats) ──────────────────────────
+// Same device-stored-history model as 1:1 chat, extended to N members: a
+// message row carries `pending_acks` (member ids that still haven't picked it
+// up) and is only deleted once that list empties — vs 1:1 where a single ack
+// deletes it. Closed groups are invite-only (an admin adds you); open groups
+// can be joined directly with the join endpoint.
+
+async function requireMember(groupId, userId) {
+  const { data } = await supabase.from('group_members').select('role')
+    .eq('group_id', groupId).eq('user_id', userId);
+  return data && data[0] ? data[0].role : null; // 'admin' | 'member' | null
+}
+
+async function groupMemberIds(groupId) {
+  const { data } = await supabase.from('group_members').select('user_id').eq('group_id', groupId);
+  return (data || []).map((m) => m.user_id);
+}
+
+app.post('/api/groups', authRequired, async (req, res) => {
+  const { name, description, is_open, avatar_url } = req.body;
+  const title = (name || '').toString().trim().slice(0, 60);
+  if (!title) return res.json({ success: false, error: 'Name required' });
+  try {
+    const { data: group, error } = await supabase.from('groups').insert([{
+      name: title,
+      description: (description || '').toString().slice(0, 300),
+      is_open: !!is_open,
+      avatar_url: avatar_url || null,
+      creator_id: req.userId,
+    }]).select().single();
+    if (error) throw error;
+    await supabase.from('group_members').insert([{ group_id: group.id, user_id: req.userId, role: 'admin' }]);
+    res.json({ success: true, data: group });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/groups', authRequired, async (req, res) => {
+  try {
+    const { data: memberships } = await supabase.from('group_members')
+      .select('group_id, role').eq('user_id', req.userId);
+    const ids = (memberships || []).map((m) => m.group_id);
+    if (!ids.length) return res.json({ success: true, data: [] });
+    const { data: groups, error } = await supabase.from('groups').select('*').in('id', ids);
+    if (error) throw error;
+    const roleByGroup = {};
+    (memberships || []).forEach((m) => { roleByGroup[m.group_id] = m.role; });
+    const enriched = await Promise.all((groups || []).map(async (g) => ({
+      ...g,
+      my_role: roleByGroup[g.id],
+      member_count: (await groupMemberIds(g.id)).length,
+    })));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/groups/:id', authRequired, async (req, res) => {
+  try {
+    const role = await requireMember(req.params.id, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Not a member' });
+    const { data: group, error } = await supabase.from('groups').select('*').eq('id', req.params.id).single();
+    if (error) throw error;
+    const { data: members } = await supabase.from('group_members')
+      .select('user_id, role, joined_at').eq('group_id', req.params.id);
+    const ids = (members || []).map((m) => m.user_id);
+    const { data: users } = await supabase.from('users').select('id, username, avatar_url').in('id', ids);
+    const userMap = {};
+    (users || []).forEach((u) => { userMap[u.id] = u; });
+    const memberList = (members || []).map((m) => ({
+      ...m,
+      username: userMap[m.user_id]?.username || 'User',
+      avatar_url: userMap[m.user_id]?.avatar_url || null,
+    }));
+    res.json({ success: true, data: { ...group, my_role: role, members: memberList } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.put('/api/groups/:id', authRequired, async (req, res) => {
+  try {
+    const role = await requireMember(req.params.id, req.userId);
+    if (role !== 'admin') return res.status(403).json({ success: false, error: 'Admins only' });
+    const { name, description, avatar_url } = req.body;
+    const update = {};
+    if (name != null) update.name = name.toString().trim().slice(0, 60);
+    if (description != null) update.description = description.toString().slice(0, 300);
+    if (avatar_url != null) update.avatar_url = avatar_url;
+    const { data, error } = await supabase.from('groups').update(update).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Open groups: join directly. Closed groups: 403 — an admin must add you.
+app.post('/api/groups/:id/join', authRequired, async (req, res) => {
+  try {
+    const { data: group } = await supabase.from('groups').select('is_open').eq('id', req.params.id).single();
+    if (!group) return res.json({ success: false, error: 'Not found' });
+    if (!group.is_open) return res.status(403).json({ success: false, error: 'This group is closed — ask an admin to add you' });
+    const existing = await requireMember(req.params.id, req.userId);
+    if (existing) return res.json({ success: true }); // already a member
+    await supabase.from('group_members').insert([{ group_id: req.params.id, user_id: req.userId, role: 'member' }]);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Admin adds someone (the only way into a CLOSED group).
+app.post('/api/groups/:id/members', authRequired, async (req, res) => {
+  try {
+    const role = await requireMember(req.params.id, req.userId);
+    if (role !== 'admin') return res.status(403).json({ success: false, error: 'Admins only' });
+    const targetId = (req.body.user_id || '').toString();
+    if (!targetId) return res.json({ success: false, error: 'user_id required' });
+    const existing = await requireMember(req.params.id, targetId);
+    if (existing) return res.json({ success: true });
+    await supabase.from('group_members').insert([{ group_id: req.params.id, user_id: targetId, role: 'member' }]);
+    const { data: group } = await supabase.from('groups').select('name').eq('id', req.params.id).single();
+    createNotification(targetId, req.userId, 'group_invite', `Added you to "${group?.name || 'a group'}"`);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// An admin removes someone, OR a member removes themself (= leave group).
+app.delete('/api/groups/:id/members/:userId', authRequired, async (req, res) => {
+  try {
+    const myRole = await requireMember(req.params.id, req.userId);
+    if (!myRole) return res.status(403).json({ success: false, error: 'Not a member' });
+    const isSelf = req.params.userId === req.userId;
+    if (!isSelf && myRole !== 'admin') return res.status(403).json({ success: false, error: 'Admins only' });
+    await supabase.from('group_members').delete().eq('group_id', req.params.id).eq('user_id', req.params.userId);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/groups/:id/admins/:userId', authRequired, async (req, res) => {
+  try {
+    const myRole = await requireMember(req.params.id, req.userId);
+    if (myRole !== 'admin') return res.status(403).json({ success: false, error: 'Admins only' });
+    const targetRole = await requireMember(req.params.id, req.params.userId);
+    if (!targetRole) return res.json({ success: false, error: 'Not a member' });
+    await supabase.from('group_members').update({ role: 'admin' })
+      .eq('group_id', req.params.id).eq('user_id', req.params.userId);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/groups/:id/admins/:userId', authRequired, async (req, res) => {
+  try {
+    const myRole = await requireMember(req.params.id, req.userId);
+    if (myRole !== 'admin') return res.status(403).json({ success: false, error: 'Admins only' });
+    await supabase.from('group_members').update({ role: 'member' })
+      .eq('group_id', req.params.id).eq('user_id', req.params.userId);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── GROUP MESSAGES (device-stored history, N-way ack) ────────────────────────
+
+app.get('/api/groups/:id/messages', authRequired, async (req, res) => {
+  try {
+    const role = await requireMember(req.params.id, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Not a member' });
+    // Only rows still queued FOR ME (I haven't acked them yet) — mirrors the
+    // 1:1 "server only holds the undelivered queue" model.
+    const { data, error } = await supabase.from('group_messages').select('*')
+      .eq('group_id', req.params.id)
+      .contains('pending_acks', [req.userId])
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/groups/:id/messages', authRequired, async (req, res) => {
+  const { content, message_type, media_url, reply_to } = req.body;
+  try {
+    const role = await requireMember(req.params.id, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Not a member' });
+    const members = await groupMemberIds(req.params.id);
+    const pending_acks = members.filter((id) => id !== req.userId);
+    const { data, error } = await supabase.from('group_messages').insert([{
+      group_id: req.params.id, sender_id: req.userId, content: content || '',
+      message_type: message_type || 'text', media_url: media_url || null,
+      reply_to: reply_to || null, pending_acks,
+    }]).select().single();
+    if (error) throw error;
+    const previews = { image: '📷 Photo', video: '🎥 Video', voice: '🎤 Voice', gif: 'GIF' };
+    await supabase.from('groups').update({
+      last_message: previews[message_type] || content || '',
+      updated_at: new Date().toISOString(),
+    }).eq('id', req.params.id);
+    for (const uid of pending_acks) emitToUser(uid, 'receive_group_message', data);
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/groups/:id/messages/ack', authRequired, async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, 500) : [];
+  if (!ids.length) return res.json({ success: true });
+  try {
+    const { data: rows } = await supabase.from('group_messages').select('id, pending_acks')
+      .eq('group_id', req.params.id).in('id', ids);
+    for (const row of rows || []) {
+      const remaining = (row.pending_acks || []).filter((id) => id !== req.userId);
+      if (remaining.length === 0) {
+        await supabase.from('group_messages').delete().eq('id', row.id);
+      } else {
+        await supabase.from('group_messages').update({ pending_acks: remaining }).eq('id', row.id);
+      }
+    }
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/groups/:groupId/messages/:messageId', authRequired, async (req, res) => {
+  try {
+    const { data: m } = await supabase.from('group_messages').select('sender_id').eq('id', req.params.messageId);
+    if (!m || m.length === 0) return res.json({ success: false, error: 'Not found' });
+    if (m[0].sender_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    await supabase.from('group_messages').delete().eq('id', req.params.messageId);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── ADMIN ────────────────────────────────────────────────────────────────────
 // All admin routes require a valid token AND is_admin = true.
 
