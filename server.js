@@ -2031,6 +2031,61 @@ app.get('/api/news', async (req, res) => {
   }
 });
 
+// ─── ОБЗОР: username → exact-handle YouTube channel + cached trending ─────────
+// Deliberately NEVER uses search.list (100 quota units/call — would exhaust
+// the free 10,000/day tier almost immediately). channels.list?forHandle= is
+// 1 unit and exact-match only, which is exactly what "does @username also
+// happen to be a real YouTube handle" needs. Recent uploads come from the
+// same free RSS-feed helper (fetchYtVideos) the Газета feature already uses
+// — zero additional quota. See resolveYtChannel/fetchYtVideos above.
+app.get('/api/youtube/channel', async (req, res) => {
+  const handle = (req.query.handle || '').toString().trim();
+  if (!handle) return res.json({ success: true, data: { found: false, videos: [] } });
+  try {
+    const videos = await fetchYtVideos(handle, 8);
+    res.json({ success: true, data: { found: videos.length > 0, videos } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+const _trendingCache = new Map(); // regionCode → { ts, data }
+const TRENDING_CACHE_MS = 3 * 60 * 60 * 1000; // 3h — trending barely moves faster than this
+
+async function fetchTrending(region) {
+  if (!YOUTUBE_API_KEY) return [];
+  const r = await fetch(
+    'https://www.googleapis.com/youtube/v3/videos'
+    + `?part=snippet&chart=mostPopular&regionCode=${region}&maxResults=25&key=${YOUTUBE_API_KEY}`);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || 'yt api error');
+  return (j.items || []).map((v) => ({
+    id: 'yt_' + v.id,
+    videoId: v.id,
+    title: v.snippet?.title || '',
+    channel: v.snippet?.channelTitle || '',
+    image: v.snippet?.thumbnails?.high?.url || v.snippet?.thumbnails?.default?.url || '',
+    link: `https://www.youtube.com/watch?v=${v.id}`,
+  }));
+}
+
+// One shared cache per region across ALL users — this is the entire point:
+// a thousand people opening Обзор in the same hour costs exactly ONE call.
+app.get('/api/youtube/trending', async (req, res) => {
+  const region = req.query.region === 'ru' ? 'RU' : 'US';
+  const cached = _trendingCache.get(region);
+  if (cached && Date.now() - cached.ts < TRENDING_CACHE_MS) {
+    return res.json({ success: true, data: cached.data });
+  }
+  try {
+    const data = await fetchTrending(region);
+    _trendingCache.set(region, { ts: Date.now(), data });
+    res.json({ success: true, data });
+  } catch (e) {
+    // Serve stale cache rather than an empty feed if the refresh call failed.
+    if (cached) return res.json({ success: true, data: cached.data });
+    res.json({ success: false, error: e.message });
+  }
+});
+
 // Keep both languages warm: refresh every 15 min in the background, and once
 // on boot so the very first user already gets a cached (instant) response.
 setInterval(() => { refreshNews('en'); refreshNews('ru'); }, NEWS_CACHE_MS);
