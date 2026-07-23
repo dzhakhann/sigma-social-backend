@@ -3402,7 +3402,8 @@ app.delete('/api/groups/:groupId/messages/:messageId', authRequired, async (req,
 // a standing backdoor, it permanently disables itself after the first use).
 app.post('/api/crm/auth/bootstrap', async (req, res) => {
   try {
-    const { count } = await supabase.from('admin_users').select('*', { count: 'exact', head: true });
+    const { count, error: countErr } = await supabase.from('admin_users').select('*', { count: 'exact', head: true });
+    if (countErr) throw countErr; // surface "table doesn't exist" instead of silently treating it as "0 rows"
     if ((count || 0) > 0) {
       return res.json({ success: false, error: 'Already bootstrapped — ask an existing admin to create your account.' });
     }
@@ -3435,7 +3436,8 @@ app.post('/api/crm/auth/login', async (req, res) => {
 // Whether the panel should show the bootstrap screen or the normal login.
 app.get('/api/crm/auth/bootstrapped', async (req, res) => {
   try {
-    const { count } = await supabase.from('admin_users').select('*', { count: 'exact', head: true });
+    const { count, error } = await supabase.from('admin_users').select('*', { count: 'exact', head: true });
+    if (error) throw error; // e.g. "Could not find the table 'public.admin_users'" — migration not run yet
     res.json({ success: true, bootstrapped: (count || 0) > 0 });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
