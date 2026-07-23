@@ -2866,6 +2866,12 @@ app.post('/api/groups/:id/messages/ack', authRequired, async (req, res) => {
   try {
     const { data: rows } = await supabase.from('group_messages').select('id, pending_acks')
       .eq('group_id', req.params.id).in('id', ids);
+    // "Seen by" has nowhere to live once a fully-acked row is deleted (this
+    // server is a relay, not permanent storage — see device-stored history),
+    // so it's pushed live over the socket instead: every open chat screen
+    // (including the sender's) accumulates it into local history as it
+    // happens, the same way 1:1 read receipts already work.
+    const members = await groupMemberIds(req.params.id);
     for (const row of rows || []) {
       const remaining = (row.pending_acks || []).filter((id) => id !== req.userId);
       if (remaining.length === 0) {
@@ -2873,8 +2879,45 @@ app.post('/api/groups/:id/messages/ack', authRequired, async (req, res) => {
       } else {
         await supabase.from('group_messages').update({ pending_acks: remaining }).eq('id', row.id);
       }
+      for (const uid of members) {
+        emitToUser(uid, 'group_message_seen',
+          { group_id: req.params.id, message_id: row.id, user_id: req.userId });
+      }
     }
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Reactions: one emoji per user per message (picking a new one replaces the
+// old, tapping the same one again clears it) — same rule Telegram uses.
+app.post('/api/groups/:groupId/messages/:messageId/react', authRequired, async (req, res) => {
+  const emoji = (req.body.emoji || '').toString();
+  if (!emoji) return res.json({ success: false, error: 'emoji is required' });
+  try {
+    const role = await requireMember(req.params.groupId, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Not a member' });
+    const { data: rows } = await supabase.from('group_messages').select('reactions')
+      .eq('id', req.params.messageId).eq('group_id', req.params.groupId);
+    if (!rows || rows.length === 0) return res.json({ success: false, error: 'Not found' });
+    const reactions = { ...(rows[0].reactions || {}) };
+    const already = reactions[emoji]?.includes(req.userId);
+    // Clear this user from every emoji first (one reaction per user).
+    for (const key of Object.keys(reactions)) {
+      reactions[key] = (reactions[key] || []).filter((id) => id !== req.userId);
+      if (reactions[key].length === 0) delete reactions[key];
+    }
+    if (!already) {
+      reactions[emoji] = [...(reactions[emoji] || []), req.userId];
+    }
+    const { error } = await supabase.from('group_messages')
+      .update({ reactions }).eq('id', req.params.messageId);
+    if (error) throw error;
+    const members = await groupMemberIds(req.params.groupId);
+    for (const uid of members) {
+      emitToUser(uid, 'group_message_reaction',
+        { group_id: req.params.groupId, message_id: req.params.messageId, reactions });
+    }
+    res.json({ success: true, data: reactions });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
