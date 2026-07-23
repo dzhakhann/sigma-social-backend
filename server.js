@@ -1832,7 +1832,19 @@ async function resolveYtChannel(handle) {
         'https://www.googleapis.com/youtube/v3/channels'
         + `?part=id&forHandle=${encodeURIComponent(h)}&key=${YOUTUBE_API_KEY}`);
       const j = await r.json();
-      const id = j.items?.[0]?.id || null;
+      let id = j.items?.[0]?.id || null;
+      // forHandle is an exact match on the NEW @handle only — a search like
+      // "Drake" that isn't literally someone's handle came back empty here
+      // even when a channel obviously exists. forUsername matches the OLDER
+      // legacy-username scheme instead (still 1 quota unit) and catches a
+      // few of those cases before giving up.
+      if (!id && !j.error) {
+        const r2 = await fetch(
+          'https://www.googleapis.com/youtube/v3/channels'
+          + `?part=id&forUsername=${encodeURIComponent(h)}&key=${YOUTUBE_API_KEY}`);
+        const j2 = await r2.json();
+        id = j2.items?.[0]?.id || null;
+      }
       if (id) { _ytChannelCache.set(handle, id); return id; }
       // If the handle genuinely doesn't resolve, cache null (skip it).
       if (!j.error) { _ytChannelCache.set(handle, null); return null; }
@@ -2331,6 +2343,29 @@ app.delete('/api/posts/:postId', authRequired, async (req, res) => {
     await supabase.from('likes').delete().eq('post_id', req.params.postId);
     await supabase.from('posts').delete().eq('id', req.params.postId);
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Same ownership-checked edit pattern as PUT /api/comments/:commentId.
+app.put('/api/posts/:postId', authRequired, async (req, res) => {
+  const { content } = req.body;
+  if (content == null || !content.toString().trim()) {
+    return res.json({ success: false, error: 'Empty post' });
+  }
+  try {
+    const { data: rows } = await supabase.from('posts').select('user_id').eq('id', req.params.postId);
+    const post = rows && rows[0];
+    if (!post) return res.json({ success: false, error: 'Not found' });
+    if (post.user_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    // Try with is_edited; if that column doesn't exist yet, fall back.
+    let { data, error } = await supabase.from('posts')
+      .update({ content: content.toString().trim(), is_edited: true }).eq('id', req.params.postId).select().single();
+    if (error) {
+      ({ data, error } = await supabase.from('posts')
+        .update({ content: content.toString().trim() }).eq('id', req.params.postId).select().single());
+    }
+    if (error) throw error;
+    res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 

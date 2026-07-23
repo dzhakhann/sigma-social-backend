@@ -5,6 +5,10 @@
      to play anything ("Error 153"). The Flutter app opens this page in a
      WebView instead of building the player HTML in-memory.
      Query params: v=<videoId> mute=1 controls=0 loop=1
+     `controls` no longer toggles YOUTUBE'S native chrome (that's always off
+     now, see playerVars below) — it toggles whether THIS page draws its own
+     minimal play/pause + seek bar (fullscreen) vs staying a silent shielded
+     loop with zero visible chrome (inline preview).
      Events are reported to the app via the SigmaYT JavaScript channel (and
      mirrored into document.title for easy testing in a normal browser). -->
 <head>
@@ -14,19 +18,34 @@
     html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
     #p { position: absolute; inset: 0; }
     /* The API replaces #p with an <iframe id="p"> — make it fill the page. */
-    iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
-    /* Transparent shield over the player: swallows taps so YouTube never shows
-       its channel-title bar or the play/pause overlay on the inline preview. */
+    iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; pointer-events: none; }
+    /* Transparent shield over the player: swallows/routes taps so YouTube's
+       own overlay (title bar, pause screen, "watch on YouTube" link) never
+       shows — every visible control on top of the video is ours. */
     #shield { position: absolute; inset: 0; z-index: 5; background: transparent; }
+    #playBtn {
+      position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+      width: 64px; height: 64px; border-radius: 50%; z-index: 6;
+      background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center;
+      transition: opacity .15s;
+    }
+    #playBtn svg { width: 28px; height: 28px; }
+    #seekWrap { position: absolute; left: 0; right: 0; bottom: 0; z-index: 6; padding: 14px 12px 10px; display: none; }
+    #seekTrack { position: relative; height: 3px; border-radius: 2px; background: rgba(255,255,255,.28); }
+    #seekFill { position: absolute; left: 0; top: 0; bottom: 0; width: 0%; border-radius: 2px; background: #fff; }
+    #seekTrack { cursor: pointer; }
+    #seekTrack::before { content: ''; position: absolute; top: -10px; bottom: -10px; left: 0; right: 0; } /* bigger tap target */
   </style>
 </head>
 <body>
   <div id="p"></div>
+  <div id="playBtn"></div>
+  <div id="seekWrap"><div id="seekTrack"><div id="seekFill"></div></div></div>
   <script>
     var q = new URLSearchParams(location.search);
     var vid = (q.get('v') || '').replace(/[^\w-]/g, '');
     var mute = q.get('mute') === '1';
-    var controls = q.get('controls') !== '0';
+    var customChrome = q.get('controls') !== '0'; // fullscreen player wants our own controls
     var loop = q.get('loop') === '1';
     var started = false;
 
@@ -41,6 +60,24 @@
       document.head.appendChild(tag);
 
       var player = null;
+      var playBtn = document.getElementById('playBtn');
+      var seekWrap = document.getElementById('seekWrap');
+      var seekTrack = document.getElementById('seekTrack');
+      var seekFill = document.getElementById('seekFill');
+      var PLAY_ICON = '<svg viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7z"/></svg>';
+      var PAUSE_ICON = '<svg viewBox="0 0 24 24" fill="#fff"><path d="M6 5h4v14H6zm8 0h4v14h-4z"/></svg>';
+      var hideTimer = null;
+
+      function showPlayBtn(show) {
+        playBtn.style.display = show ? 'flex' : 'none';
+      }
+      function flashChrome() {
+        if (!customChrome) return;
+        playBtn.style.opacity = '1';
+        clearTimeout(hideTimer);
+        hideTimer = setTimeout(function () { playBtn.style.opacity = '0'; }, 1400);
+      }
+
       // Called from the app (WebViewController.runJavaScript).
       window.sigmaSetMuted = function (m) {
         if (!player) return;
@@ -57,7 +94,7 @@
           playerVars: {
             autoplay: 1,
             mute: mute ? 1 : 0,
-            controls: controls ? 1 : 0,
+            controls: 0, // ALWAYS off — no native YouTube chrome, ever.
             playsinline: 1,
             rel: 0,
             fs: 0,
@@ -72,19 +109,44 @@
             onReady: function (e) {
               if (mute) e.target.mute();
               e.target.playVideo();
-              // Inline preview: cover the player with a tap shield so YouTube
-              // never draws its title/channel bar or pause overlay. The
-              // fullscreen player keeps controls, so it gets no shield.
-              if (!controls) {
-                var s = document.createElement('div');
-                s.id = 'shield';
-                document.body.appendChild(s);
+              // Shield over the player: swallows taps so YouTube never draws
+              // its own title/channel bar or pause overlay underneath ours.
+              var s = document.createElement('div');
+              s.id = 'shield';
+              document.body.appendChild(s);
+              if (customChrome) {
+                seekWrap.style.display = 'block';
+                playBtn.innerHTML = PAUSE_ICON;
+                s.addEventListener('click', function () {
+                  if (!player) return;
+                  var state = player.getPlayerState();
+                  if (state === YT.PlayerState.PLAYING) { player.pauseVideo(); }
+                  else { player.playVideo(); }
+                  flashChrome();
+                });
+                seekTrack.addEventListener('click', function (ev) {
+                  var rect = seekTrack.getBoundingClientRect();
+                  var frac = Math.min(1, Math.max(0, (ev.clientX - rect.left) / rect.width));
+                  try { player.seekTo(frac * player.getDuration(), true); } catch (err) {}
+                  flashChrome();
+                });
+                setInterval(function () {
+                  try {
+                    var d = player.getDuration();
+                    if (d > 0) seekFill.style.width = (player.getCurrentTime() / d * 100) + '%';
+                  } catch (err) {}
+                }, 500);
               }
               send('ready');
             },
             onStateChange: function (e) {
-              if (e.data === YT.PlayerState.PLAYING) { started = true; send('playing'); }
-              else if (e.data === YT.PlayerState.ENDED) {
+              if (e.data === YT.PlayerState.PLAYING) {
+                started = true;
+                send('playing');
+                if (customChrome) { playBtn.innerHTML = PAUSE_ICON; showPlayBtn(true); flashChrome(); }
+              } else if (e.data === YT.PlayerState.PAUSED) {
+                if (customChrome) { playBtn.innerHTML = PLAY_ICON; showPlayBtn(true); playBtn.style.opacity = '1'; clearTimeout(hideTimer); }
+              } else if (e.data === YT.PlayerState.ENDED) {
                 if (loop) { e.target.seekTo(0, true); e.target.playVideo(); }
                 else send('ended');
               }
