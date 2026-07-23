@@ -1196,6 +1196,56 @@ app.get('/api/ai/horoscope', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── AI COMPANION (daily message + simple mood, tied to goals/aura) ───────────
+// ONE Gemini call per user per day — cached on the users row (companion_message
+// + companion_message_date), same throttle pattern as aura_day for the daily
+// aura bonus. "Mood" is cheap/derived, recomputed every call — only the text
+// is expensive and cached.
+app.get('/api/companion', authRequired, async (req, res) => {
+  try {
+    const lang = req.query.lang === 'ru' ? 'ru' : 'en';
+    const today = new Date().toISOString().slice(0, 10);
+    const { data: rows } = await supabase.from('users')
+      .select('aura, aura_day, companion_message, companion_message_date, username')
+      .eq('id', req.userId);
+    const u = rows?.[0] || {};
+    const year = new Date().getFullYear();
+    const { data: goals } = await supabase.from('goals')
+      .select('title, progress, status').eq('user_id', req.userId).eq('year', year);
+    const list = goals || [];
+    const avgProgress = list.length
+      ? Math.round(list.reduce((s, g) => s + (g.progress || 0), 0) / list.length) : 0;
+    const daysSinceCheckIn = u.aura_day
+      ? Math.round((new Date(today) - new Date(u.aura_day)) / 86400000) : 99;
+    const mood = daysSinceCheckIn >= 2 ? 'fading' : avgProgress >= 60 ? 'glowing' : 'okay';
+
+    if (u.companion_message_date === today && u.companion_message) {
+      return res.json({ success: true, data: { text: u.companion_message, mood, avgProgress } });
+    }
+
+    const doneToday = list.filter((g) => g.status === 'done').length;
+    const goalsSummary = list.length
+      ? `у пользователя ${list.length} целей на ${year} год, средний прогресс ${avgProgress}%, выполнено ${doneToday}`
+      : 'у пользователя пока нет целей на этот год';
+    const system = lang === 'ru'
+      ? 'Ты — ИИ-компаньон приложения Sigmacta, живёшь в профиле пользователя как маленькое ' +
+        'существо, которое отражает его продуктивность. Дай ОДНУ короткую фразу дня (не больше ' +
+        '2 предложений) — тёплую, с характером, без markdown и звёздочек. Если давно не заходил ' +
+        'и прогресс низкий — мягко подколи. Если прогресс хороший — похвали с гордостью.'
+      : 'You are the AI companion of the Sigmacta app, living in the user\'s profile as a small ' +
+        'creature that reflects their productivity. Give ONE short line of the day (max 2 ' +
+        'sentences) — warm, with personality, no markdown or asterisks. If they haven\'t checked ' +
+        'in and progress is low, gently tease. If progress is good, proudly praise.';
+    const reply = await callGemini(system, [
+      { role: 'user', text: goalsSummary },
+    ]);
+    const text = reply || (lang === 'ru' ? 'Я тут, жду твоих целей! ✨' : 'I\'m here, waiting on your goals! ✨');
+    await supabase.from('users')
+      .update({ companion_message: text, companion_message_date: today }).eq('id', req.userId);
+    res.json({ success: true, data: { text, mood, avgProgress } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── GIF SEARCH (Giphy proxy — key stays on the server) ───────────────────────
 // Tenor was shut down by Google on 2026-06-30, so we use Giphy instead.
 const GIPHY_KEY = process.env.GIPHY_API_KEY || '';
