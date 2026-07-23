@@ -713,6 +713,18 @@ async function sweepFullyAckedGroupMessages() {
   } catch (_) {}
 }
 
+// Same grace-period idea for 1:1 messages (see /api/messages/ack): an acked
+// message used to be deleted instantly, so reacting to it moments later
+// (very common — the recipient's app auto-acks within seconds) hit "Not
+// found". Kept a while longer instead, reaped on a delay.
+const MESSAGE_GRACE_MS = 48 * 60 * 60 * 1000; // 48h
+async function sweepAckedMessages() {
+  try {
+    await supabase.from('messages').delete()
+      .lt('acked_at', new Date(Date.now() - MESSAGE_GRACE_MS).toISOString());
+  } catch (_) {}
+}
+
 app.post('/api/notes', authRequired, async (req, res) => {
   const text = (req.body.text || '').toString().trim().slice(0, NOTE_MAX_LEN);
   if (!text) return res.json({ success: false, error: 'Empty note' });
@@ -2802,7 +2814,19 @@ app.get('/api/messages/:chatId', authRequired, async (req, res) => {
     for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
       emitToUser(uid, 'messages_read', { chatId: req.params.chatId, reader: req.userId });
     }
-    const { data, error } = await supabase.from('messages').select('*').eq('chat_id', req.params.chatId).order('created_at', { ascending: true });
+    // acked_at IS NULL = "still queued" (mirrors group's pending_acks check) —
+    // an acked row is kept a while for reactions (see the ack endpoint) but
+    // shouldn't keep being re-delivered; both sides already have their own
+    // local copy of it by the time it's acked.
+    let { data, error } = await supabase.from('messages').select('*')
+      .eq('chat_id', req.params.chatId).is('acked_at', null)
+      .order('created_at', { ascending: true });
+    // Migration not applied yet — fall back to the pre-grace-period behavior
+    // (every still-existing row is "queued", exactly as before).
+    if (error && /acked_at/.test(error.message || '')) {
+      ({ data, error } = await supabase.from('messages').select('*')
+        .eq('chat_id', req.params.chatId).order('created_at', { ascending: true }));
+    }
     if (error) throw error;
     res.json({ success: true, data: data || [] });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -2863,11 +2887,21 @@ app.post('/api/messages/ack', authRequired, async (req, res) => {
     }
     const list = (Array.isArray(ids) ? ids : []).slice(0, 500);
     if (!list.length) return res.json({ success: true });
+    sweepAckedMessages(); // fire-and-forget, opportunistic
     // Only messages FROM the other side can be acked away — my own queued
-    // messages must survive until THEIR phone confirms.
-    const { error } = await supabase.from('messages').delete()
+    // messages must survive until THEIR phone confirms. Grace period instead
+    // of an immediate delete: reacting to a message needs the row to still
+    // exist, and this ack can land within seconds of the message being sent.
+    const { error } = await supabase.from('messages')
+      .update({ acked_at: new Date().toISOString() })
       .eq('chat_id', chat_id).in('id', list).neq('sender_id', req.userId);
-    if (error) throw error;
+    if (error && /acked_at/.test(error.message || '')) {
+      // Migration not run yet — fall back to the old immediate-delete behavior.
+      await supabase.from('messages').delete()
+        .eq('chat_id', chat_id).in('id', list).neq('sender_id', req.userId);
+    } else if (error) {
+      throw error;
+    }
     const other = chat[0].user1_id === req.userId ? chat[0].user2_id : chat[0].user1_id;
     // Delivered-and-read receipt for the sender's ✓✓ (their copy is local).
     emitToUser(other, 'messages_read', { chatId: chat_id, reader: req.userId, ids: list });
@@ -2883,6 +2917,65 @@ app.delete('/api/messages/:messageId', authRequired, async (req, res) => {
     const { error } = await supabase.from('messages').delete().eq('id', req.params.messageId);
     if (error) throw error;
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Reactions on 1:1 messages: one emoji per user per message (picking a new
+// one replaces the old, tapping the same one again clears it) — mirrors the
+// group_messages reaction endpoint exactly.
+app.post('/api/messages/:messageId/react', authRequired, async (req, res) => {
+  const emoji = (req.body.emoji || '').toString();
+  if (!emoji) return res.json({ success: false, error: 'emoji is required' });
+  try {
+    const { data: rows } = await supabase.from('messages').select('chat_id, reactions')
+      .eq('id', req.params.messageId);
+    if (!rows || rows.length === 0) return res.json({ success: false, error: 'Not found' });
+    const { data: chat } = await supabase.from('chats').select('user1_id, user2_id').eq('id', rows[0].chat_id);
+    if (!chat || chat.length === 0) return res.json({ success: false, error: 'Chat not found' });
+    if (chat[0].user1_id !== req.userId && chat[0].user2_id !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    const reactions = { ...(rows[0].reactions || {}) };
+    const already = reactions[emoji]?.includes(req.userId);
+    for (const key of Object.keys(reactions)) {
+      reactions[key] = (reactions[key] || []).filter((id) => id !== req.userId);
+      if (reactions[key].length === 0) delete reactions[key];
+    }
+    if (!already) reactions[emoji] = [...(reactions[emoji] || []), req.userId];
+    const { error } = await supabase.from('messages').update({ reactions }).eq('id', req.params.messageId);
+    if (error) throw error;
+    for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
+      emitToUser(uid, 'message_reaction',
+        { chat_id: rows[0].chat_id, message_id: req.params.messageId, reactions });
+    }
+    res.json({ success: true, data: reactions });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Resyncs reactions/read-status for messages the client already has cached
+// locally. Needed because there's no other way to learn about a change that
+// happened while this chat screen wasn't open to catch the live socket event
+// (device-stored history has no server-side backlog to replay) — without
+// this, a reaction added (or a message read) while the other side's app was
+// closed would never show up for them.
+app.post('/api/messages/sync', authRequired, async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, 500) : [];
+  if (!ids.length) return res.json({ success: true, data: {} });
+  try {
+    const { data: rows, error } = await supabase.from('messages')
+      .select('id, chat_id, is_read, reactions').in('id', ids);
+    if (error) throw error;
+    const chatIds = [...new Set((rows || []).map((r) => r.chat_id))];
+    const { data: chats } = await supabase.from('chats').select('id, user1_id, user2_id').in('id', chatIds);
+    const myChats = new Set((chats || [])
+      .filter((c) => c.user1_id === req.userId || c.user2_id === req.userId)
+      .map((c) => c.id));
+    const out = {};
+    for (const row of rows || []) {
+      if (!myChats.has(row.chat_id)) continue;
+      out[row.id] = { is_read: row.is_read, reactions: row.reactions || {} };
+    }
+    res.json({ success: true, data: out });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -2962,13 +3055,16 @@ app.get('/api/groups/:id', authRequired, async (req, res) => {
     const { data: members } = await supabase.from('group_members')
       .select('user_id, role, joined_at').eq('group_id', req.params.id);
     const ids = (members || []).map((m) => m.user_id);
-    const { data: users } = await supabase.from('users').select('id, username, avatar_url').in('id', ids);
+    // last_seen rides along so the client can show "N online" the same way
+    // it already computes online/last-seen for 1:1 chat (< 70s ago = online).
+    const { data: users } = await supabase.from('users').select('id, username, avatar_url, last_seen').in('id', ids);
     const userMap = {};
     (users || []).forEach((u) => { userMap[u.id] = u; });
     const memberList = (members || []).map((m) => ({
       ...m,
       username: userMap[m.user_id]?.username || 'User',
       avatar_url: userMap[m.user_id]?.avatar_url || null,
+      last_seen: userMap[m.user_id]?.last_seen || null,
     }));
     res.json({ success: true, data: { ...group, my_role: role, members: memberList } });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -3171,6 +3267,33 @@ app.post('/api/groups/:groupId/messages/:messageId/react', authRequired, async (
         { group_id: req.params.groupId, message_id: req.params.messageId, reactions });
     }
     res.json({ success: true, data: reactions });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Resyncs reactions/seen-by for group messages the client already has
+// cached locally — same reasoning as /api/messages/sync: once a message's
+// pending_acks empties it stops being returned by GET .../messages, so a
+// device that wasn't live-connected when a reaction/ack happened would
+// otherwise never learn about it. seen_by is derived (not stored): every
+// CURRENT member minus whoever's still pending minus the sender themselves.
+app.post('/api/groups/:groupId/messages/sync', authRequired, async (req, res) => {
+  const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, 500) : [];
+  if (!ids.length) return res.json({ success: true, data: {} });
+  try {
+    const role = await requireMember(req.params.groupId, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Not a member' });
+    const { data: rows, error } = await supabase.from('group_messages')
+      .select('id, reactions, pending_acks, sender_id')
+      .eq('group_id', req.params.groupId).in('id', ids);
+    if (error) throw error;
+    const members = await groupMemberIds(req.params.groupId);
+    const out = {};
+    for (const row of rows || []) {
+      const pending = new Set(row.pending_acks || []);
+      const seen_by = members.filter((uid) => uid !== row.sender_id && !pending.has(uid));
+      out[row.id] = { reactions: row.reactions || {}, seen_by };
+    }
+    res.json({ success: true, data: out });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
