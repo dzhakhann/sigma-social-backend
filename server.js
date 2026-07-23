@@ -1019,6 +1019,22 @@ app.delete('/api/duels/:id', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── SIGMAFIT (exercise data is bundled client-side — this only logs a
+// completed session, one tiny row, no media/CDN cost) ─────────────────────
+app.post('/api/workouts', authRequired, async (req, res) => {
+  const { routine_id, duration_seconds } = req.body;
+  try {
+    const { data, error } = await supabase.from('workouts').insert([{
+      user_id: req.userId,
+      routine_id: (routine_id || '').toString().slice(0, 40),
+      duration_seconds: Math.max(0, Math.min(7200, Number(duration_seconds) || 0)),
+    }]).select().single();
+    if (error) throw error;
+    awardAura(req.userId, 15); // completing a workout
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── AI (Google Gemini — key stays on the server, never in the app) ───────────
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
