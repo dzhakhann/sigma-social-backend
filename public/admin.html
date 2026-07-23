@@ -3,219 +3,470 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sigma Social — Admin</title>
+<title>Sigmacta CRM</title>
 <style>
-  :root{--bg:#0F1015;--surface:#171923;--surface2:#1F2230;--ink:#E9EBF1;
-    --soft:#878DA0;--accent:#4F7CFF;--danger:#E5556B;--green:#3ECf8E;
+  :root{--bg:#0B0C10;--surface:#14151C;--surface2:#1B1D27;--surface3:#22252F;--ink:#EDEEF3;
+    --soft:#8A8FA3;--accent:#4F7CFF;--accent2:#6E92FF;--danger:#E5556B;--green:#3ECf8E;
     --amber:#FFB020;--line:rgba(255,255,255,.08)}
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--ink);
-    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  .screen{display:none}.screen.on{display:block}
-  .badge{display:inline-flex;width:36px;height:36px;border-radius:10px;
+    font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;font-size:14px}
+  .hidden{display:none !important}
+  a{color:var(--accent2)}
+  .row{display:flex;align-items:center;gap:10px}
+  .col{display:flex;flex-direction:column;gap:6px}
+  .grow{flex:1;min-width:0}
+  .muted{color:var(--soft)}
+  .badge{display:inline-flex;width:38px;height:38px;border-radius:11px;
     align-items:center;justify-content:center;font-weight:800;color:#fff;
-    background:linear-gradient(135deg,#6E92FF,#2D5BFF);font-size:18px}
-  .row{display:flex;align-items:center;gap:10px}.muted{color:var(--soft)}
+    background:linear-gradient(135deg,#6E92FF,#2D5BFF);font-size:18px;flex:none}
   .btn{background:var(--accent);color:#fff;border:0;border-radius:10px;
-    padding:11px 16px;font-weight:700;cursor:pointer;font-size:14px}
-  .btn.ghost{background:var(--surface2);color:var(--ink)}
-  .btn.sm{padding:7px 11px;font-size:12.5px;border-radius:8px}
+    padding:9px 14px;font-weight:700;cursor:pointer;font-size:13px;white-space:nowrap}
+  .btn:hover{filter:brightness(1.08)}
+  .btn.ghost{background:var(--surface3);color:var(--ink)}
+  .btn.sm{padding:6px 10px;font-size:12px;border-radius:8px}
   .btn.danger{background:transparent;color:var(--danger);border:1px solid rgba(229,85,107,.4)}
   .btn.warn{background:transparent;color:var(--amber);border:1px solid rgba(255,176,32,.4)}
   .btn.ok{background:transparent;color:var(--green);border:1px solid rgba(62,207,142,.4)}
-  input{width:100%;background:var(--surface2);border:1px solid var(--line);
-    color:var(--ink);border-radius:10px;padding:11px 14px;font-size:15px;outline:none}
-  input:focus{border-color:var(--accent)}
-  .err{color:var(--danger);font-size:13px;min-height:18px;margin-top:8px}
-  #login{min-height:100vh;display:none;align-items:center;justify-content:center;padding:20px}
-  #login.on{display:flex}
-  .loginCard{background:var(--surface);border:1px solid var(--line);border-radius:18px;padding:22px;width:340px}
-  .topbar{position:sticky;top:0;z-index:5;background:rgba(15,16,21,.9);
-    backdrop-filter:blur(12px);border-bottom:1px solid var(--line);
-    display:flex;align-items:center;justify-content:space-between;padding:12px 18px}
-  .wrap{max-width:1020px;margin:0 auto;padding:16px}
-  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(104px,1fr));gap:10px}
+  .btn:disabled{opacity:.5;cursor:default}
+  input,textarea,select{width:100%;background:var(--surface3);border:1px solid var(--line);
+    color:var(--ink);border-radius:10px;padding:10px 13px;font-size:14px;outline:none;font-family:inherit}
+  input:focus,textarea:focus,select:focus{border-color:var(--accent)}
+  textarea{resize:vertical;min-height:60px}
+  label{font-size:12px;color:var(--soft);font-weight:600}
+  .err{color:var(--danger);font-size:12.5px;min-height:16px}
+  .ok-msg{color:var(--green);font-size:12.5px;min-height:16px}
+
+  #authScreen{min-height:100vh;display:flex;align-items:center;justify-content:center;padding:20px}
+  .authCard{background:var(--surface);border:1px solid var(--line);border-radius:20px;padding:26px;width:360px}
+
+  #app{display:none;min-height:100vh}
+  #app.on{display:flex}
+  .sidebar{width:220px;flex:none;background:var(--surface);border-right:1px solid var(--line);
+    padding:18px 12px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh;overflow:auto}
+  .navBtn{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:10px;cursor:pointer;
+    color:var(--soft);font-weight:600;font-size:13.5px;position:relative}
+  .navBtn:hover{background:var(--surface2)}
+  .navBtn.on{background:var(--accent);color:#fff}
+  .navBtn .cnt{margin-left:auto;background:var(--danger);color:#fff;border-radius:8px;padding:1px 7px;font-size:10.5px;font-weight:800}
+  .main{flex:1;min-width:0}
+  .topbar{position:sticky;top:0;z-index:5;background:rgba(11,12,16,.88);backdrop-filter:blur(14px);
+    border-bottom:1px solid var(--line);padding:14px 22px;display:flex;align-items:center;justify-content:space-between}
+  .wrap{max-width:1180px;margin:0 auto;padding:20px}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:10px;margin-bottom:18px}
   .stat{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;text-align:center}
-  .stat b{font-size:24px;display:block}.stat span{color:var(--soft);font-size:12px}
-  .stat.online b{color:var(--green)}
-  .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;
-    margin-right:6px;box-shadow:0 0 8px var(--green)}
-  .tabs{display:flex;gap:8px;margin:16px 0 10px;flex-wrap:wrap}
-  .tab{background:var(--surface2);color:var(--soft);border:0;border-radius:10px;
-    padding:9px 16px;cursor:pointer;font-weight:600}
-  .tab.on{background:var(--accent);color:#fff}
-  .item{display:flex;align-items:center;gap:10px;background:var(--surface);
-    border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-bottom:8px;flex-wrap:wrap}
-  .grow{flex:1;min-width:160px}
+  .stat b{font-size:22px;display:block}.stat span{color:var(--soft);font-size:11.5px}
+  .stat.online b{color:var(--green)}.stat.warn2 b{color:var(--amber)}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--green);display:inline-block;margin-right:6px;box-shadow:0 0 8px var(--green)}
+
+  .card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:14px;margin-bottom:10px}
+  .item{display:flex;align-items:center;gap:12px;background:var(--surface);
+    border:1px solid var(--line);border-radius:12px;padding:11px 13px;margin-bottom:8px;flex-wrap:wrap;cursor:default}
+  .item.clickable{cursor:pointer}
+  .item.clickable:hover{border-color:var(--accent)}
   .name{font-weight:700;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
   .sub{color:var(--soft);font-size:12px}
-  .thumb{width:46px;height:46px;border-radius:9px;object-fit:cover;border:1px solid var(--line)}
-  .pill{font-size:10px;padding:2px 7px;border-radius:6px;font-weight:700}
-  .pill.admin{color:var(--accent);background:rgba(79,124,255,.18)}
+  .thumb{width:44px;height:44px;border-radius:10px;object-fit:cover;border:1px solid var(--line);flex:none;background:var(--surface3)}
+  .avatar{width:44px;height:44px;border-radius:50%;object-fit:cover;border:1px solid var(--line);flex:none;background:var(--surface3)}
+  .pill{font-size:9.5px;padding:2px 7px;border-radius:6px;font-weight:800;letter-spacing:.02em}
+  .pill.verified{color:var(--accent2);background:rgba(79,124,255,.18)}
   .pill.ban{color:var(--danger);background:rgba(229,85,107,.18)}
+  .pill.sys{color:var(--amber);background:rgba(255,176,32,.18)}
   .actions{display:flex;gap:6px;flex-wrap:wrap}
-  .ver{width:16px;height:16px;vertical-align:-3px}
+  .ver{width:14px;height:14px;vertical-align:-2px}
+  .tabsRow{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+  .tabsRow .tab{background:var(--surface2);color:var(--soft);border:0;border-radius:9px;padding:7px 13px;cursor:pointer;font-weight:600;font-size:12.5px}
+  .tabsRow .tab.on{background:var(--accent);color:#fff}
+
+  .overlay{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:20;display:flex;align-items:flex-start;
+    justify-content:center;overflow:auto;padding:30px 16px}
+  .modal{background:var(--surface);border:1px solid var(--line);border-radius:18px;width:100%;max-width:640px;
+    padding:22px;margin:auto}
+  .modalHead{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .closeX{cursor:pointer;color:var(--soft);font-size:20px;line-height:1;padding:4px}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .thumbsGrid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:8px}
+  .thumbsGrid img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:8px;background:var(--surface3)}
+  .sessionRow{display:flex;justify-content:space-between;gap:10px;font-size:12px;padding:6px 0;border-bottom:1px solid var(--line)}
+  .empty{color:var(--soft);padding:20px;text-align:center}
+  ::-webkit-scrollbar{width:9px;height:9px}
+  ::-webkit-scrollbar-thumb{background:var(--surface3);border-radius:6px}
 </style>
 </head>
 <body>
 
-<div id="login" class="on">
-  <div class="loginCard">
-    <div class="row" style="margin-bottom:16px">
+<div id="authScreen">
+  <div class="authCard">
+    <div class="row" style="margin-bottom:18px">
       <div class="badge">Σ</div>
-      <div><div style="font-weight:800;font-size:17px">Sigma Admin</div>
-        <div class="muted" style="font-size:12px">Admins only</div></div>
+      <div><div style="font-weight:800;font-size:17px">Sigmacta CRM</div>
+        <div class="muted" style="font-size:12px" id="authSub">Admin sign-in</div></div>
     </div>
-    <input id="u" placeholder="Username" autocomplete="username"/>
-    <div style="height:10px"></div>
-    <input id="p" type="password" placeholder="Password" autocomplete="current-password"/>
-    <div class="err" id="loginErr"></div>
-    <button class="btn" style="width:100%;margin-top:6px" onclick="login()">Sign in</button>
+    <div id="loginForm" class="col hidden">
+      <input id="lu" placeholder="Username" autocomplete="username"/>
+      <input id="lp" type="password" placeholder="Password" autocomplete="current-password"/>
+      <div class="err" id="loginErr"></div>
+      <button class="btn" onclick="doLogin()">Sign in</button>
+    </div>
+    <div id="bootForm" class="col hidden">
+      <div class="muted" style="font-size:12.5px;margin-bottom:4px">No admin account exists yet — create the first one.</div>
+      <input id="bu" placeholder="Choose a username" autocomplete="username"/>
+      <input id="bp" type="password" placeholder="Choose a password (min 6 chars)" autocomplete="new-password"/>
+      <div class="err" id="bootErr"></div>
+      <button class="btn" onclick="doBootstrap()">Create admin account</button>
+    </div>
   </div>
 </div>
 
-<div id="dash" class="screen">
-  <div class="topbar">
-    <div class="row"><div class="badge">Σ</div><div style="font-weight:800">Sigma Admin</div></div>
-    <div class="row">
-      <button class="btn sm" onclick="runBotsNow()">🤖 Run bots</button>
-      <button class="btn ghost sm" onclick="loadAll()">Refresh</button>
-      <button class="btn ghost sm" onclick="logout()">Logout</button>
-    </div>
+<div id="app">
+  <div class="sidebar">
+    <div class="row" style="padding:8px 10px 16px"><div class="badge">Σ</div>
+      <div style="font-weight:800;font-size:14px">Sigmacta CRM</div></div>
+    <div class="navBtn" data-tab="dashboard" onclick="setTab('dashboard')">📊 Dashboard</div>
+    <div class="navBtn" data-tab="users" onclick="setTab('users')">👤 Users</div>
+    <div class="navBtn" data-tab="posts" onclick="setTab('posts')">🖼 Posts</div>
+    <div class="navBtn" data-tab="comments" onclick="setTab('comments')">💬 Comments</div>
+    <div class="navBtn" data-tab="stories" onclick="setTab('stories')">⭐ Stories</div>
+    <div class="navBtn" data-tab="reels" onclick="setTab('reels')">🎬 Reels</div>
+    <div class="navBtn" data-tab="reports" onclick="setTab('reports')">🚩 Reports<span class="cnt hidden" id="reportsCnt"></span></div>
+    <div class="navBtn" data-tab="verifications" onclick="setTab('verifications')">✔ Verification<span class="cnt hidden" id="verifCnt"></span></div>
+    <div class="navBtn" data-tab="admins" onclick="setTab('admins')">🛡 Admins</div>
+    <div class="navBtn" data-tab="audit" onclick="setTab('audit')">📜 Audit Log</div>
+    <div style="flex:1"></div>
+    <div class="navBtn" onclick="logout()">🚪 Logout</div>
   </div>
-  <div class="wrap">
-    <div class="stats" id="stats"></div>
-    <div style="margin-top:14px">
-      <input id="search" placeholder="🔍 Search by username, email or text…" oninput="render()"/>
+  <div class="main">
+    <div class="topbar">
+      <div style="font-weight:800" id="pageTitle">Dashboard</div>
+      <div class="row">
+        <input id="search" placeholder="🔍 Search…" style="width:220px" oninput="render()"/>
+        <button class="btn ghost sm" onclick="loadAll()">↻ Refresh</button>
+      </div>
     </div>
-    <div class="tabs" id="tabs"></div>
-    <div id="list"></div>
+    <div class="wrap" id="content"></div>
   </div>
+</div>
+
+<div class="overlay hidden" id="overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal" id="modalBody"></div>
 </div>
 
 <script>
 const API='/api';
-let token=localStorage.getItem('admin_token')||'';
+let token=localStorage.getItem('crm_token')||'';
+let me=JSON.parse(localStorage.getItem('crm_me')||'null');
 const H=()=>token?{'Authorization':'Bearer '+token}:{};
-const TABS=['users','posts','comments','stories','reels'];
-let tab='users';
-const D={users:[],posts:[],comments:[],stories:[],reels:[]};
+let tab='dashboard';
+const D={users:[],posts:[],comments:[],stories:[],reels:[],reports:[],verifications:[],admins:[],audit:[],stats:{}};
 
 const VER='<svg class="ver" viewBox="0 0 24 24"><path fill="#4F7CFF" d="M12 1l2.4 1.9 3-.3 1.1 2.8 2.8 1.4-.8 2.9.9 2.9-2.8 1.5-1.1 2.8-3-.4L12 23l-2.5-1.9-3 .4-1.1-2.8L2.6 16l.9-2.9-.8-2.9 2.8-1.4L6.6 2.6l3 .3z"/><path fill="#fff" d="M10.5 14.7l-2.3-2.3-1.2 1.2 3.5 3.5 6.2-6.2-1.2-1.2z"/></svg>';
+function esc(s){return (s||'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+function fmtDate(s){if(!s)return '';try{return new Date(s).toLocaleString();}catch(e){return s;}}
+function daysLeft(until){if(!until)return null;const ms=new Date(until)-new Date();return ms>0?Math.ceil(ms/86400000):0;}
 
-function show(el,on){const e=document.getElementById(el);
-  e.style.display=on?(el==='login'?'flex':'block'):'none';e.classList.toggle('on',on);}
-function logout(){token='';localStorage.removeItem('admin_token');show('dash',false);show('login',true);}
-function enter(){show('login',false);show('dash',true);buildTabs();loadAll();}
-
-async function login(){
-  const u=document.getElementById('u').value.trim(),p=document.getElementById('p').value;
-  const err=document.getElementById('loginErr');err.textContent='';
+// ─── Auth ──────────────────────────────────────────────────────────────────
+async function boot(){
   try{
-    const r=await fetch(API+'/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({username:u,password:p})});
+    const r=await fetch(API+'/crm/auth/bootstrapped');
     const j=await r.json();
-    if(j.success!==true){err.textContent=j.error||'Login failed';return;}
-    if(j.data.user.is_admin!==true){err.textContent='This account is not an admin.';return;}
-    token=j.data.token;localStorage.setItem('admin_token',token);enter();
+    if(j.bootstrapped===false){
+      document.getElementById('bootForm').classList.remove('hidden');
+      document.getElementById('authSub').textContent='First-time setup';
+    } else {
+      document.getElementById('loginForm').classList.remove('hidden');
+    }
+  }catch(e){ document.getElementById('loginForm').classList.remove('hidden'); }
+  if(token && me){ enter(); }
+}
+async function doBootstrap(){
+  const username=document.getElementById('bu').value.trim(), password=document.getElementById('bp').value;
+  const err=document.getElementById('bootErr'); err.textContent='';
+  try{
+    const r=await fetch(API+'/crm/auth/bootstrap',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+    const j=await r.json();
+    if(j.success!==true){err.textContent=j.error||'Failed';return;}
+    token=j.data.token; me=j.data.admin;
+    localStorage.setItem('crm_token',token); localStorage.setItem('crm_me',JSON.stringify(me));
+    enter();
   }catch(e){err.textContent='Connection error';}
 }
-
-function buildTabs(){
-  document.getElementById('tabs').innerHTML=TABS.map(t=>
-    `<button class="tab ${t===tab?'on':''}" onclick="setTab('${t}')">${t[0].toUpperCase()+t.slice(1)}</button>`).join('');
+async function doLogin(){
+  const username=document.getElementById('lu').value.trim(), password=document.getElementById('lp').value;
+  const err=document.getElementById('loginErr'); err.textContent='';
+  try{
+    const r=await fetch(API+'/crm/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username,password})});
+    const j=await r.json();
+    if(j.success!==true){err.textContent=j.error||'Login failed';return;}
+    token=j.data.token; me=j.data.admin;
+    localStorage.setItem('crm_token',token); localStorage.setItem('crm_me',JSON.stringify(me));
+    enter();
+  }catch(e){err.textContent='Connection error';}
 }
-function setTab(t){tab=t;buildTabs();render();}
+function logout(){token='';me=null;localStorage.removeItem('crm_token');localStorage.removeItem('crm_me');
+  document.getElementById('app').classList.remove('on');document.getElementById('authScreen').style.display='flex';}
+function enter(){document.getElementById('authScreen').style.display='none';document.getElementById('app').classList.add('on');buildNav();loadAll();}
 
+// ─── Generic API helpers ───────────────────────────────────────────────────
 async function api(path,opts={}){
   const r=await fetch(API+path,{...opts,headers:{...H(),...(opts.headers||{})}});
-  if(r.status===401||r.status===403){logout();throw new Error('unauth');}
+  if(r.status===401){logout();throw new Error('unauth');}
   return r.json();
 }
 const jpost=(p,b)=>api(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+const jput=(p,b)=>api(p,{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
 const jdel=(p,b)=>api(p,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify(b||{})});
+
+// ─── Nav ───────────────────────────────────────────────────────────────────
+const TABS=[['dashboard','📊 Dashboard'],['users','👤 Users'],['posts','🖼 Posts'],['comments','💬 Comments'],
+  ['stories','⭐ Stories'],['reels','🎬 Reels'],['reports','🚩 Reports'],['verifications','✔ Verification'],
+  ['admins','🛡 Admins'],['audit','📜 Audit Log']];
+function buildNav(){
+  document.querySelectorAll('.navBtn[data-tab]').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
+}
+function setTab(t){tab=t;buildNav();document.getElementById('pageTitle').textContent=(TABS.find(x=>x[0]===t)||['',t])[1];render();}
 
 async function loadAll(){
   try{
-    const [s,u,p,c,st,re]=await Promise.all([api('/admin/stats'),api('/admin/users'),
-      api('/admin/posts'),api('/admin/comments'),api('/admin/stories'),api('/admin/reels')]);
-    renderStats(s.data||{});
-    D.users=u.data||[];D.posts=p.data||[];D.comments=c.data||[];D.stories=st.data||[];D.reels=re.data||[];
+    const [s,u,p,c,st,rl,rp,vf,ad,al]=await Promise.all([
+      api('/crm/stats'),api('/crm/users'),api('/crm/posts'),api('/crm/comments'),api('/crm/stories'),
+      api('/crm/reels'),api('/crm/reports?status=open'),api('/crm/verification-requests?status=pending'),
+      api('/crm/admins'),api('/crm/audit-log')]);
+    D.stats=s.data||{}; D.users=u.data||[]; D.posts=p.data||[]; D.comments=c.data||[]; D.stories=st.data||[];
+    D.reels=rl.data||[]; D.reports=rp.data||[]; D.verifications=vf.data||[]; D.admins=ad.data||[]; D.audit=al.data||[];
+    updateBadges();
     render();
   }catch(e){}
 }
-function esc(s){return (s||'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
-
-function renderStats(d){
-  document.getElementById('stats').innerHTML=
-    `<div class="stat online"><b><span class="dot"></span>${d.online??0}</b><span>Online</span></div>`+
-    [['Users','users'],['Posts','posts'],['Comments','comments'],['Messages','messages'],
-     ['Stories','stories'],['Reels','reels']].map(m=>
-     `<div class="stat"><b>${d[m[1]]??0}</b><span>${m[0]}</span></div>`).join('');
+function updateBadges(){
+  const rc=document.getElementById('reportsCnt'), vc=document.getElementById('verifCnt');
+  if(D.reports.length){rc.textContent=D.reports.length;rc.classList.remove('hidden');}else rc.classList.add('hidden');
+  if(D.verifications.length){vc.textContent=D.verifications.length;vc.classList.remove('hidden');}else vc.classList.add('hidden');
 }
-
 function q(){return document.getElementById('search').value.trim().toLowerCase();}
-function match(text){const s=q();return !s|| (text||'').toLowerCase().includes(s);}
+function match(text){const s=q();return !s||(text||'').toLowerCase().includes(s);}
 
 function render(){
-  const el=document.getElementById('list');
-  if(tab==='users') el.innerHTML=renderUsers();
-  else if(tab==='posts') el.innerHTML=renderMedia(D.posts,'posts');
-  else if(tab==='comments') el.innerHTML=renderMedia(D.comments,'comments');
-  else if(tab==='stories') el.innerHTML=renderMedia(D.stories,'stories');
-  else if(tab==='reels') el.innerHTML=renderMedia(D.reels,'reels');
+  const el=document.getElementById('content');
+  if(tab==='dashboard') el.innerHTML=renderDashboard();
+  else if(tab==='users') el.innerHTML=renderUsers();
+  else if(tab==='posts') el.innerHTML=renderContent(D.posts,'posts');
+  else if(tab==='comments') el.innerHTML=renderContent(D.comments,'comments');
+  else if(tab==='stories') el.innerHTML=renderContent(D.stories,'stories');
+  else if(tab==='reels') el.innerHTML=renderContent(D.reels,'reels');
+  else if(tab==='reports') el.innerHTML=renderReports();
+  else if(tab==='verifications') el.innerHTML=renderVerifications();
+  else if(tab==='admins') el.innerHTML=renderAdmins();
+  else if(tab==='audit') el.innerHTML=renderAudit();
 }
 
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+function renderDashboard(){
+  const d=D.stats;
+  const cards=[['online','Online',true,false],['users','Users'],['posts','Posts'],['comments','Comments'],
+    ['messages','Messages'],['stories','Stories'],['reels','Reels'],
+    ['open_reports','Open reports',false,true],['pending_verifications','Pending verifications',false,true]];
+  return '<div class="stats">'+cards.map(c=>
+    `<div class="stat ${c[2]?'online':''} ${c[3]?'warn2':''}"><b>${c[2]?'<span class="dot"></span>':''}${d[c[0]]??0}</b><span>${c[1]}</span></div>`
+  ).join('')+'</div>'+
+  '<div class="card"><b>Welcome, '+esc(me?.username||'')+'.</b><div class="muted" style="margin-top:6px">'+
+  'Use the sidebar to manage users, moderate content, and review reports/verification requests. '+
+  'Every action you take here is logged in the Audit Log tab.</div></div>';
+}
+
+// ─── Users ──────────────────────────────────────────────────────────────────
 function renderUsers(){
   const rows=D.users.filter(u=>match(u.username)||match(u.email)).map(u=>{
-    const pills=(u.is_admin?'<span class="pill admin">admin</span>':'')+
-      (u.is_banned?'<span class="pill ban">blocked</span>':'');
-    return `<div class="item">
+    const banLeft=u.is_banned?daysLeft(u.banned_until):null;
+    const pills=(u.is_verified?'':'')+(u.is_system?'<span class="pill sys">system</span>':'')+
+      (u.is_banned?`<span class="pill ban">banned${banLeft!==null?(banLeft>0?' · '+banLeft+'d left':' · expired'):' · permanent'}</span>`:'');
+    const sess=u.session;
+    const sessTxt=sess?`${esc(sess.device_model||'?')} · ${esc(sess.os_version||'?')} · ${esc(sess.ip||'?')}`:'no session data yet';
+    return `<div class="item clickable" onclick="openUser('${u.id}')">
+      <img class="avatar" src="${esc(u.avatar_url||'')}" onerror="this.style.visibility='hidden'">
       <div class="grow"><div class="name">@${esc(u.username)} ${u.is_verified?VER:''} ${pills}</div>
-        <div class="sub">${esc(u.email)}</div></div>
-      <div class="actions">
-        <button class="btn ok sm" onclick="verify('${u.id}')">${u.is_verified?'Unverify':'Verify'}</button>
-        ${u.is_banned?`<button class="btn warn sm" onclick="unban('${u.id}')">Unblock</button>`
-          :`<button class="btn warn sm" onclick="ban('${u.id}','${esc(u.username)}')">Block</button>`}
-        <button class="btn ghost sm" onclick="adm('${u.id}')">${u.is_admin?'Unadmin':'Make admin'}</button>
-        <button class="btn danger sm" onclick="delUser('${u.id}','${esc(u.username)}')">Delete</button>
-      </div></div>`;});
-  return rows.join('')||'<div class="muted">Nothing found</div>';
+        <div class="sub">${esc(u.email)} · joined ${fmtDate(u.created_at)}</div>
+        <div class="sub">${sessTxt}</div></div>
+    </div>`;});
+  return (rows.join('')||'<div class="empty">Nothing found</div>');
 }
 
-function renderMedia(list,kind){
+async function openUser(id){
+  const j=await api('/crm/users/'+id);
+  if(j.success!==true){alert(j.error||'Failed to load');return;}
+  const u=j.data.user, posts=j.data.posts, sessions=j.data.sessions, log=j.data.audit_log, reports=j.data.reports;
+  const banLeft=u.is_banned?daysLeft(u.banned_until):null;
+  const html=`
+    <div class="modalHead"><div class="row"><img class="avatar" style="width:56px;height:56px" src="${esc(u.avatar_url||'')}">
+      <div><div style="font-weight:800;font-size:16px">@${esc(u.username)} ${u.is_verified?VER:''}</div>
+      <div class="sub">${esc(u.email)}</div></div></div><div class="closeX" onclick="closeModal()">✕</div></div>
+    ${u.bio?`<div class="sub" style="margin-bottom:10px">${esc(u.bio)}</div>`:''}
+    <div class="sub" style="margin-bottom:10px">${u.followers_count||0} followers · ${u.following_count||0} following ·
+      joined ${fmtDate(u.created_at)} · last seen ${fmtDate(u.last_seen)}</div>
+    ${u.is_banned?`<div class="card" style="border-color:rgba(229,85,107,.4)"><b style="color:var(--danger)">Banned</b>
+      <div class="sub">${esc(u.ban_reason||'(no reason given)')} — ${banLeft!==null?(banLeft>0?banLeft+' day(s) left':'expired, will clear on next login'):'permanent'}</div></div>`:''}
+    <div class="actions" style="margin-bottom:14px">
+      <button class="btn ok sm" onclick="uVerify('${u.id}')">${u.is_verified?'Unverify':'Verify ✓'}</button>
+      ${u.is_banned?`<button class="btn warn sm" onclick="uUnban('${u.id}')">Unban</button>`
+        :`<button class="btn warn sm" onclick="uBan('${u.id}','${esc(u.username)}')">Ban…</button>`}
+      <button class="btn ghost sm" onclick="uMessage('${u.id}','${esc(u.username)}')">✉ Message</button>
+      ${u.avatar_url?`<button class="btn warn sm" onclick="uRemoveAvatar('${u.id}')">Remove avatar</button>`:''}
+      <button class="btn danger sm" onclick="uDelete('${u.id}','${esc(u.username)}')">Delete account</button>
+    </div>
+    <div class="tabsRow">
+      <button class="tab on" onclick="showUserPane(this,'posts')">Posts (${posts.length})</button>
+      <button class="tab" onclick="showUserPane(this,'sessions')">Sessions (${sessions.length})</button>
+      <button class="tab" onclick="showUserPane(this,'log')">Admin log (${log.length})</button>
+      <button class="tab" onclick="showUserPane(this,'reports')">Reports on them (${reports.length})</button>
+    </div>
+    <div id="paneposts">${posts.length?`<div class="thumbsGrid">${posts.filter(p=>p.image_url).map(p=>`<img src="${esc(p.image_url)}">`).join('')}</div>`:'<div class="empty">No posts</div>'}</div>
+    <div id="panesessions" class="hidden">${sessions.length?sessions.map(s=>`<div class="sessionRow"><span>${esc(s.device_model||'?')} · ${esc(s.os_version||'?')} · v${esc(s.app_version||'?')}</span><span class="muted">${esc(s.ip||'?')} · ${fmtDate(s.created_at)}</span></div>`).join(''):'<div class="empty">No session data</div>'}</div>
+    <div id="panelog" class="hidden">${log.length?log.map(a=>`<div class="sessionRow"><span>${esc(a.admin_username)} — ${esc(a.action)}</span><span class="muted">${fmtDate(a.created_at)}</span></div>`).join(''):'<div class="empty">No admin actions on this account</div>'}</div>
+    <div id="panereports" class="hidden">${reports.length?reports.map(r=>`<div class="sessionRow"><span>${esc(r.reason)} — ${esc(r.note||'')}</span><span class="muted">${fmtDate(r.created_at)}</span></div>`).join(''):'<div class="empty">No reports</div>'}</div>
+  `;
+  document.getElementById('modalBody').innerHTML=html;
+  document.getElementById('overlay').classList.remove('hidden');
+}
+function showUserPane(btn,name){
+  btn.parentElement.querySelectorAll('.tab').forEach(t=>t.classList.remove('on'));btn.classList.add('on');
+  ['posts','sessions','log','reports'].forEach(p=>document.getElementById('pane'+p).classList.toggle('hidden',p!==name));
+}
+function closeModal(){document.getElementById('overlay').classList.add('hidden');}
+
+async function uVerify(id){await jpost('/crm/users/'+id+'/verify');closeModal();loadAll();}
+async function uBan(id,name){
+  const days=prompt('Ban @'+name+' for how many days? (leave empty for permanent)');
+  if(days===null)return;
+  const reason=prompt('Reason (the user will be notified):')||'';
+  await jpost('/crm/users/'+id+'/ban',{reason,days:days.trim()?parseInt(days,10):null});
+  closeModal();loadAll();
+}
+async function uUnban(id){await jpost('/crm/users/'+id+'/unban');closeModal();loadAll();}
+async function uRemoveAvatar(id){
+  const reason=prompt('Reason for removing this avatar (user will be notified):');
+  if(reason===null)return;
+  await jpost('/crm/users/'+id+'/remove-avatar',{reason});closeModal();loadAll();
+}
+async function uMessage(id,name){
+  const content=prompt('Message to @'+name+' (delivered into their Sigmagram chat):');
+  if(!content)return;
+  await jpost('/crm/users/'+id+'/message',{content});closeModal();alert('Sent.');
+}
+async function uDelete(id,name){
+  if(!confirm('Permanently delete @'+name+' and ALL their content? This cannot be undone.'))return;
+  const j=await jdel('/crm/users/'+id);if(j.success!==true)alert(j.error||'Failed');closeModal();loadAll();
+}
+
+// ─── Content (posts/comments/stories/reels) ────────────────────────────────
+function renderContent(list,kind){
+  const withReason = kind==='posts'||kind==='comments'||kind==='stories'||kind==='reels';
+  const editable = kind==='posts'||kind==='comments';
   const rows=list.filter(x=>match(x.username)||match(x.content)||match(x.caption)).map(x=>{
     const img=x.image_url?`<img class="thumb" src="${esc(x.image_url)}">`:'';
     const vid=x.video_url?`<a class="btn ghost sm" href="${esc(x.video_url)}" target="_blank">▶ video</a>`:'';
-    const text=kind==='reels'?(x.caption||'') : (x.content||'');
-    const body=kind==='stories'?'<span class="muted">[story]</span>':(esc(text)||'<span class="muted">[no text]</span>');
-    const ep = kind==='posts'?'posts':kind==='comments'?'comments':kind==='stories'?'stories':'reels';
-    const reason = (kind==='posts'||kind==='comments');
+    const text=kind==='reels'?(x.caption||''):(x.content||'');
+    const body=kind==='stories'?'<span class="muted">[story media]</span>':(esc(text)||'<span class="muted">[no text]</span>');
     return `<div class="item">
       ${img}
-      <div class="grow"><div class="sub">@${esc(x.username)}</div>
-        <div style="margin-top:4px">${body}</div></div>
+      <div class="grow"><div class="sub">@${esc(x.username)} · ${fmtDate(x.created_at)}</div>
+        <div style="margin-top:4px" id="body_${kind}_${x.id}">${body}</div></div>
       ${vid}
-      <button class="btn danger sm" onclick="del('${ep}','${x.id}',${reason})">Delete</button>
+      <div class="actions">
+        ${editable?`<button class="btn ghost sm" onclick="editItem('${kind}','${x.id}','${esc(text).replace(/'/g,"\\'")}')">Edit</button>`:''}
+        <button class="btn danger sm" onclick="delItem('${kind}','${x.id}',${withReason})">Delete</button>
+      </div>
     </div>`;});
-  return rows.join('')||'<div class="muted">Nothing found</div>';
+  return rows.join('')||'<div class="empty">Nothing found</div>';
 }
-
-async function verify(id){await jpost('/admin/users/'+id+'/verify');loadAll();}
-async function ban(id,name){const r=prompt('Reason for blocking @'+name+' (user will be notified):');
-  if(r===null)return;await jpost('/admin/users/'+id+'/ban',{reason:r});loadAll();}
-async function unban(id){await jpost('/admin/users/'+id+'/unban');loadAll();}
-async function adm(id){await jpost('/admin/users/'+id+'/toggle-admin');loadAll();}
-async function delUser(id,name){if(!confirm('Permanently delete @'+name+' and ALL their content?'))return;
-  const j=await jdel('/admin/users/'+id);if(j.success!==true)alert(j.error||'Failed');loadAll();}
-async function del(ep,id,withReason){
+const KIND_EP={posts:'posts',comments:'comments',stories:'stories',reels:'reels'};
+async function editItem(kind,id,current){
+  const val=prompt('Edit content:',current);
+  if(val===null)return;
+  await jput('/crm/'+KIND_EP[kind]+'/'+id,{content:val});loadAll();
+}
+async function delItem(kind,id,withReason){
   let reason='';
   if(withReason){const r=prompt('Reason (the author will be notified):');if(r===null)return;reason=r;}
   else if(!confirm('Delete this item?'))return;
-  await jdel('/admin/'+ep+'/'+id,{reason});loadAll();
+  await jdel('/crm/'+KIND_EP[kind]+'/'+id,{reason});loadAll();
 }
 
-if(token){enter();}
+// ─── Reports ────────────────────────────────────────────────────────────────
+function renderReports(){
+  if(!D.reports.length) return '<div class="empty">No open reports 🎉</div>';
+  return D.reports.map(r=>`<div class="item">
+    <div class="grow">
+      <div class="name">${r.target_type} <span class="sub">#${esc(String(r.target_id).slice(0,8))}</span></div>
+      <div class="sub">reported by @${esc(r.reporter_username)} · ${fmtDate(r.created_at)}</div>
+      <div style="margin-top:4px">${esc(r.reason)}${r.note?' — '+esc(r.note):''}</div>
+    </div>
+    <div class="actions">
+      <button class="btn ok sm" onclick="reportAction('${r.id}','resolve')">Resolve</button>
+      <button class="btn ghost sm" onclick="reportAction('${r.id}','dismiss')">Dismiss</button>
+    </div>
+  </div>`).join('');
+}
+async function reportAction(id,action){await jpost('/crm/reports/'+id+'/'+action);loadAll();}
+
+// ─── Verification requests ─────────────────────────────────────────────────
+function renderVerifications(){
+  if(!D.verifications.length) return '<div class="empty">No pending requests</div>';
+  return D.verifications.map(v=>`<div class="item">
+    <div class="grow">
+      <div class="name">@${esc(v.username)}</div>
+      <div class="sub">${fmtDate(v.created_at)}</div>
+      <div style="margin-top:4px">${v.email?'Email: '+esc(v.email)+'<br>':''}${v.wiki?'Link: '+esc(v.wiki)+'<br>':''}${esc(v.info||'')}</div>
+    </div>
+    <div class="actions">
+      <button class="btn ok sm" onclick="verifAction('${v.id}','approve')">Approve</button>
+      <button class="btn danger sm" onclick="verifAction('${v.id}','reject')">Reject</button>
+    </div>
+  </div>`).join('');
+}
+async function verifAction(id,action){await jpost('/crm/verification-requests/'+id+'/'+action);loadAll();}
+
+// ─── Admins ─────────────────────────────────────────────────────────────────
+function renderAdmins(){
+  const list=D.admins.map(a=>`<div class="item">
+    <div class="grow"><div class="name">@${esc(a.username)}${a.id===me.id?' <span class="sub">(you)</span>':''}</div>
+      <div class="sub">created ${fmtDate(a.created_at)}</div></div>
+    ${a.id!==me.id?`<button class="btn danger sm" onclick="deleteAdmin('${a.id}','${esc(a.username)}')">Remove</button>`:''}
+  </div>`).join('');
+  return `<div class="card"><b>Create new admin</b>
+    <div class="grid2" style="margin-top:10px">
+      <input id="newAdminU" placeholder="Username">
+      <input id="newAdminP" type="password" placeholder="Password (min 6 chars)">
+    </div>
+    <div class="err" id="newAdminErr" style="margin-top:6px"></div>
+    <button class="btn" style="margin-top:8px" onclick="createAdmin()">Create</button>
+  </div>` + (list||'<div class="empty">No other admins</div>');
+}
+async function createAdmin(){
+  const username=document.getElementById('newAdminU').value.trim();
+  const password=document.getElementById('newAdminP').value;
+  const err=document.getElementById('newAdminErr');
+  const j=await jpost('/crm/admins',{username,password});
+  if(j.success!==true){err.textContent=j.error||'Failed';return;}
+  loadAll();
+}
+async function deleteAdmin(id,name){
+  if(!confirm('Remove admin @'+name+'?'))return;
+  const j=await jdel('/crm/admins/'+id);if(j.success!==true)alert(j.error||'Failed');loadAll();
+}
+
+// ─── Audit log ──────────────────────────────────────────────────────────────
+function renderAudit(){
+  if(!D.audit.length) return '<div class="empty">No actions logged yet</div>';
+  return D.audit.map(a=>`<div class="item">
+    <div class="grow">
+      <div class="name">${esc(a.admin_username)} <span class="sub">→ ${esc(a.action)}</span></div>
+      <div class="sub">${a.target_type?a.target_type+' #'+esc(String(a.target_id||'').slice(0,8)):''} · ${fmtDate(a.created_at)}</div>
+      ${a.detail&&Object.keys(a.detail).length?`<div class="sub" style="margin-top:2px">${esc(JSON.stringify(a.detail))}</div>`:''}
+    </div>
+  </div>`).join('');
+}
+
+boot();
 </script>
 </body>
 </html>

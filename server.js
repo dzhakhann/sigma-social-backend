@@ -361,7 +361,10 @@ async function usernameMap(ids) {
   return m;
 }
 
-// Allow only users with is_admin = true. Chain after authRequired.
+// Allow only users with is_admin = true. Chain after authRequired. Legacy
+// path kept alive for the in-app AdminScreen (lib/screens/admin_screen.dart)
+// and the existing /api/admin/* routes it calls — the NEW CRM system below
+// (adminAuthRequired, /api/crm/*) is fully separate and doesn't touch this.
 async function adminOnly(req, res, next) {
   try {
     const { data } = await supabase.from('users').select('is_admin').eq('id', req.userId);
@@ -372,6 +375,45 @@ async function adminOnly(req, res, next) {
   } catch (e) {
     res.status(500).json({ success: false, error: e.message });
   }
+}
+
+// Admin auth is a completely separate system from the social `users`/
+// `authRequired` above — an admin token is signed with `scope: 'admin'` and
+// its `sub` is an `admin_users.id`, never a social user id, so the two can
+// never be confused/forged into each other. Powers the web CRM panel
+// (public/admin.html, /api/crm/*) only.
+async function adminAuthRequired(req, res, next) {
+  const hdr = req.headers.authorization || '';
+  const token = hdr.startsWith('Bearer ') ? hdr.slice(7) : null;
+  const payload = token ? verifyToken(token) : null;
+  if (!payload || !payload.sub || payload.scope !== 'admin') {
+    return res.status(401).json({ success: false, error: 'Not authenticated' });
+  }
+  try {
+    const { data } = await supabase.from('admin_users').select('id, username').eq('id', payload.sub);
+    if (!data || data.length === 0) {
+      return res.status(401).json({ success: false, error: 'Admin account no longer exists' });
+    }
+    req.adminId = data[0].id;
+    req.adminUsername = data[0].username;
+    next();
+  } catch (e) {
+    res.status(500).json({ success: false, error: e.message });
+  }
+}
+
+// Snapshot-logs an admin action for the panel's Activity Log tab. Never
+// blocks/throws the caller — logging failure shouldn't undo a moderation
+// action that already succeeded.
+async function logAdminAction(req, action, targetType, targetId, detail) {
+  try {
+    await supabase.from('admin_audit_log').insert([{
+      admin_id: req.adminId,
+      admin_username: req.adminUsername,
+      action, target_type: targetType || null, target_id: targetId ? String(targetId) : null,
+      detail: detail || {},
+    }]);
+  } catch (_) {}
 }
 
 // ─── HEALTH ───────────────────────────────────────────────────────────────────
@@ -452,10 +494,19 @@ app.post('/api/auth/login', async (req, res) => {
     }
     if (!ok) return res.json({ success: false, error: 'Wrong username or password' });
     if (user.is_banned === true) {
-      return res.json({
-        success: false,
-        error: `Account blocked${user.ban_reason ? ': ' + user.ban_reason : ''}`,
-      });
+      // Time-limited ban whose window has passed — clear it and let login
+      // proceed instead of requiring an admin to manually unban.
+      if (user.banned_until && new Date(user.banned_until) <= new Date()) {
+        await supabase.from('users')
+          .update({ is_banned: false, ban_reason: null, banned_until: null }).eq('id', user.id);
+      } else {
+        const until = user.banned_until
+          ? ` (until ${new Date(user.banned_until).toISOString().slice(0, 10)})` : '';
+        return res.json({
+          success: false,
+          error: `Account blocked${user.ban_reason ? ': ' + user.ban_reason : ''}${until}`,
+        });
+      }
     }
     const token = signToken({ sub: user.id, username: user.username });
     awardDailyAura(user.id); // +5 Aura for logging in today
@@ -3308,8 +3359,99 @@ app.delete('/api/groups/:groupId/messages/:messageId', authRequired, async (req,
 });
 
 // ─── ADMIN ────────────────────────────────────────────────────────────────────
-// All admin routes require a valid token AND is_admin = true.
+// A completely separate account system from the social `users` table — see
+// adminAuthRequired above. Every route below requires an admin-scoped token.
 
+// One-time bootstrap: creates the FIRST admin account, and only ever works
+// while admin_users is empty (so it can be left in place safely — it's not
+// a standing backdoor, it permanently disables itself after the first use).
+app.post('/api/crm/auth/bootstrap', async (req, res) => {
+  try {
+    const { count } = await supabase.from('admin_users').select('*', { count: 'exact', head: true });
+    if ((count || 0) > 0) {
+      return res.json({ success: false, error: 'Already bootstrapped — ask an existing admin to create your account.' });
+    }
+    const { username, password } = req.body || {};
+    if (!username || !password || password.length < 6) {
+      return res.json({ success: false, error: 'Username and a password of at least 6 characters are required' });
+    }
+    const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const { data, error } = await supabase.from('admin_users')
+      .insert([{ username: username.trim(), password_hash }]).select().single();
+    if (error) throw error;
+    const token = signToken({ sub: data.id, scope: 'admin' });
+    res.json({ success: true, data: { admin: { id: data.id, username: data.username }, token } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/auth/login', async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    const { data } = await supabase.from('admin_users').select('*').eq('username', (username || '').trim());
+    if (!data || data.length === 0) return res.json({ success: false, error: 'Wrong username or password' });
+    const admin = data[0];
+    const ok = await bcrypt.compare(password || '', admin.password_hash || '');
+    if (!ok) return res.json({ success: false, error: 'Wrong username or password' });
+    const token = signToken({ sub: admin.id, scope: 'admin' });
+    res.json({ success: true, data: { admin: { id: admin.id, username: admin.username }, token } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Whether the panel should show the bootstrap screen or the normal login.
+app.get('/api/crm/auth/bootstrapped', async (req, res) => {
+  try {
+    const { count } = await supabase.from('admin_users').select('*', { count: 'exact', head: true });
+    res.json({ success: true, bootstrapped: (count || 0) > 0 });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/admins', adminAuthRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('admin_users')
+      .select('id, username, created_at').order('created_at', { ascending: true });
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/admins', adminAuthRequired, async (req, res) => {
+  try {
+    const { username, password } = req.body || {};
+    if (!username || !password || password.length < 6) {
+      return res.json({ success: false, error: 'Username and a password of at least 6 characters are required' });
+    }
+    const password_hash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    const { data, error } = await supabase.from('admin_users')
+      .insert([{ username: username.trim(), password_hash }]).select('id, username, created_at').single();
+    if (error) throw error;
+    await logAdminAction(req, 'create_admin', 'admin', data.id, { username: data.username });
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/crm/admins/:id', adminAuthRequired, async (req, res) => {
+  try {
+    if (req.params.id === req.adminId) {
+      return res.json({ success: false, error: 'You cannot delete your own admin account' });
+    }
+    const { data } = await supabase.from('admin_users').select('username').eq('id', req.params.id);
+    await supabase.from('admin_users').delete().eq('id', req.params.id);
+    await logAdminAction(req, 'delete_admin', 'admin', req.params.id, { username: data?.[0]?.username });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/audit-log', adminAuthRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('admin_audit_log')
+      .select('*').order('created_at', { ascending: false }).limit(300);
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Legacy — feeds the in-app AdminScreen only (is_admin flag on a social
+// account). Left exactly as it was; the CRM stats route below is separate.
 app.get('/api/admin/stats', authRequired, adminOnly, async (req, res) => {
   try {
     const out = { online: onlineCount() };
@@ -3317,6 +3459,23 @@ app.get('/api/admin/stats', authRequired, adminOnly, async (req, res) => {
       const { count } = await supabase.from(t).select('*', { count: 'exact', head: true });
       out[t] = count || 0;
     }
+    res.json({ success: true, data: out });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/stats', adminAuthRequired, async (req, res) => {
+  try {
+    const out = { online: onlineCount() };
+    for (const t of ['users', 'posts', 'comments', 'messages', 'stories', 'reels']) {
+      const { count } = await supabase.from(t).select('*', { count: 'exact', head: true });
+      out[t] = count || 0;
+    }
+    const { count: openReports } = await supabase.from('reports')
+      .select('*', { count: 'exact', head: true }).eq('status', 'open');
+    const { count: pendingVerif } = await supabase.from('verification_requests')
+      .select('*', { count: 'exact', head: true }).eq('status', 'pending');
+    out.open_reports = openReports || 0;
+    out.pending_verifications = pendingVerif || 0;
     res.json({ success: true, data: out });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -3504,6 +3663,404 @@ app.delete('/api/admin/comments/:id', authRequired, adminOnly, async (req, res) 
     }
     const { error } = await supabase.from('comments').delete().eq('id', req.params.id);
     if (error) throw error;
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── CRM (new admin web panel — see adminAuthRequired above) ─────────────────
+// Fully separate from the legacy /api/admin/* block above (which the in-app
+// AdminScreen still uses): richer user data, edit (not just delete), time-
+// limited bans, an in-app "message the user" channel, and reports/
+// verification-request review.
+
+let _systemUserId = null;
+// Lazily creates (once) the "Sigmacta" account admin messages are sent
+// through, so a user sees them as a normal chat thread — Telegram's own
+// "Telegram" service-notification account is the reference point here.
+async function getOrCreateSystemUser() {
+  if (_systemUserId) return _systemUserId;
+  const { data: existing } = await supabase.from('users').select('id').eq('is_system', true).limit(1);
+  if (existing && existing[0]) { _systemUserId = existing[0].id; return _systemUserId; }
+  const password_hash = await bcrypt.hash(crypto.randomBytes(24).toString('hex'), BCRYPT_ROUNDS);
+  const { data, error } = await supabase.from('users').insert([{
+    username: 'sigmacta', email: 'system@sigma.local', password_hash,
+    bio: 'Sigmacta — официальные уведомления', is_verified: true, is_system: true,
+    followers_count: 0, following_count: 0,
+  }]).select('id').single();
+  if (error) throw error;
+  _systemUserId = data.id;
+  return _systemUserId;
+}
+
+// Delivers an admin message into the user's real Sigmagram chat (via the
+// system account) — same pipeline as any other 1:1 message, so it shows up
+// in their chat list, gets read receipts, everything, for free.
+async function sendSystemMessage(userId, content) {
+  const systemId = await getOrCreateSystemUser();
+  const { data: existingChat } = await supabase.from('chats').select('*')
+    .or(`and(user1_id.eq.${systemId},user2_id.eq.${userId}),and(user1_id.eq.${userId},user2_id.eq.${systemId})`);
+  let chat = existingChat?.[0];
+  if (!chat) {
+    const { data, error } = await supabase.from('chats')
+      .insert([{ user1_id: systemId, user2_id: userId }]).select().single();
+    if (error) throw error;
+    chat = data;
+  }
+  const { data: msg, error: msgErr } = await supabase.from('messages')
+    .insert([{ chat_id: chat.id, sender_id: systemId, content, message_type: 'text' }])
+    .select().single();
+  if (msgErr) throw msgErr;
+  await supabase.from('chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', chat.id);
+  emitToUser(userId, 'receive_message', msg);
+  return msg;
+}
+
+async function latestSessionsByUser(userIds) {
+  const uniq = [...new Set((userIds || []).filter(Boolean))];
+  if (!uniq.length) return {};
+  const { data } = await supabase.from('user_sessions')
+    .select('user_id, ip, device_model, os_version, app_version, platform, created_at')
+    .in('user_id', uniq).order('created_at', { ascending: false });
+  const m = {};
+  for (const row of data || []) if (!m[row.user_id]) m[row.user_id] = row; // first hit per id = latest (already DESC)
+  return m;
+}
+
+app.get('/api/crm/users', adminAuthRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('users')
+      .select('id, username, email, avatar_url, bio, is_admin, is_verified, is_banned, ban_reason, banned_until, is_system, followers_count, following_count, last_seen, created_at')
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    const sessions = await latestSessionsByUser((data || []).map((u) => u.id));
+    res.json({ success: true, data: (data || []).map((u) => ({ ...u, session: sessions[u.id] || null })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Full drill-down for one user: profile + recent content + session history +
+// everything an admin has ever done to this account.
+app.get('/api/crm/users/:id', adminAuthRequired, async (req, res) => {
+  const id = req.params.id;
+  try {
+    const { data: userRows, error } = await supabase.from('users').select('*').eq('id', id);
+    if (error) throw error;
+    if (!userRows || !userRows[0]) return res.json({ success: false, error: 'Not found' });
+    const user = userRows[0];
+    delete user.password_hash;
+    delete user.recovery_hash;
+    const [{ data: posts }, { data: stories }, { data: sessions }, { data: auditLog }, { data: reports }] = await Promise.all([
+      supabase.from('posts').select('*').eq('user_id', id).order('created_at', { ascending: false }).limit(60),
+      supabase.from('stories').select('*').eq('user_id', id).order('created_at', { ascending: false }).limit(30),
+      supabase.from('user_sessions').select('*').eq('user_id', id).order('created_at', { ascending: false }).limit(20),
+      supabase.from('admin_audit_log').select('*').eq('target_type', 'user').eq('target_id', id).order('created_at', { ascending: false }).limit(50),
+      supabase.from('reports').select('*').eq('target_type', 'user').eq('target_id', id).order('created_at', { ascending: false }).limit(20),
+    ]);
+    res.json({ success: true, data: { user, posts: posts || [], stories: stories || [], sessions: sessions || [], audit_log: auditLog || [], reports: reports || [] } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/crm/users/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const { data } = await supabase.from('users').select('username').eq('id', req.params.id);
+    await deleteUserCascade(req.params.id);
+    await logAdminAction(req, 'delete_user', 'user', req.params.id, { username: data?.[0]?.username });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/users/:id/ban', adminAuthRequired, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const days = req.body && Number.isFinite(req.body.days) ? Number(req.body.days) : null;
+    const banned_until = days && days > 0 ? new Date(Date.now() + days * 86400000).toISOString() : null;
+    const { error } = await supabase.from('users')
+      .update({ is_banned: true, ban_reason: reason, banned_until }).eq('id', req.params.id);
+    if (error) throw error;
+    const durationTxt = banned_until ? ` на ${days} дн.` : ' навсегда';
+    const text = `Ваш аккаунт заблокирован${durationTxt}.${reason ? ' Причина: ' + reason : ''}`;
+    await createNotification(req.params.id, null, 'admin', text);
+    await sendSystemMessage(req.params.id, text).catch(() => {});
+    await logAdminAction(req, 'ban', 'user', req.params.id, { reason, days });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/users/:id/unban', adminAuthRequired, async (req, res) => {
+  try {
+    const { error } = await supabase.from('users')
+      .update({ is_banned: false, ban_reason: null, banned_until: null }).eq('id', req.params.id);
+    if (error) throw error;
+    const text = 'Ваш аккаунт разблокирован.';
+    await createNotification(req.params.id, null, 'admin', text);
+    await sendSystemMessage(req.params.id, text).catch(() => {});
+    await logAdminAction(req, 'unban', 'user', req.params.id, {});
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/users/:id/verify', adminAuthRequired, async (req, res) => {
+  try {
+    const { data } = await supabase.from('users').select('is_verified').eq('id', req.params.id);
+    const next = !(data?.[0]?.is_verified === true);
+    const { error } = await supabase.from('users').update({ is_verified: next }).eq('id', req.params.id);
+    if (error) throw error;
+    const text = next ? 'Ваш аккаунт верифицирован ✓' : 'Верификация вашего аккаунта снята.';
+    await createNotification(req.params.id, null, 'admin', text);
+    await sendSystemMessage(req.params.id, text).catch(() => {});
+    await logAdminAction(req, next ? 'verify' : 'unverify', 'user', req.params.id, {});
+    res.json({ success: true, is_verified: next });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/users/:id/remove-avatar', adminAuthRequired, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const { error } = await supabase.from('users').update({ avatar_url: null }).eq('id', req.params.id);
+    if (error) throw error;
+    const text = `Ваша аватарка была удалена администратором.${reason ? ' Причина: ' + reason : ''}`;
+    await createNotification(req.params.id, null, 'admin', text);
+    await sendSystemMessage(req.params.id, text).catch(() => {});
+    await logAdminAction(req, 'remove_avatar', 'user', req.params.id, { reason });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Free-form message from an admin, delivered into the user's real chat list.
+app.post('/api/crm/users/:id/message', adminAuthRequired, async (req, res) => {
+  try {
+    const content = (req.body && req.body.content || '').toString().trim();
+    if (!content) return res.json({ success: false, error: 'Empty message' });
+    await sendSystemMessage(req.params.id, content);
+    await logAdminAction(req, 'message', 'user', req.params.id, { content });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/posts', adminAuthRequired, async (req, res) => {
+  try {
+    const { data: posts, error } = await supabase.from('posts').select('*').order('created_at', { ascending: false }).limit(300);
+    if (error) throw error;
+    const m = await usernameMap((posts || []).map((p) => p.user_id));
+    res.json({ success: true, data: (posts || []).map((p) => ({ ...p, username: m[p.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.put('/api/crm/posts/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const content = (req.body && req.body.content) || '';
+    const { data: post } = await supabase.from('posts').select('user_id').eq('id', req.params.id);
+    const { error } = await supabase.from('posts').update({ content }).eq('id', req.params.id);
+    if (error) throw error;
+    if (post?.[0]) {
+      const text = 'Один из ваших постов был изменён администратором.';
+      await createNotification(post[0].user_id, null, 'admin', text);
+      await sendSystemMessage(post[0].user_id, text).catch(() => {});
+    }
+    await logAdminAction(req, 'edit_post', 'post', req.params.id, { content });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/crm/posts/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const { data: post } = await supabase.from('posts').select('user_id').eq('id', req.params.id);
+    if (post?.[0]) {
+      const text = `Ваш пост был удалён администратором.${reason ? ' Причина: ' + reason : ''}`;
+      await createNotification(post[0].user_id, null, 'admin', text);
+      await sendSystemMessage(post[0].user_id, text).catch(() => {});
+    }
+    const { error } = await supabase.from('posts').delete().eq('id', req.params.id);
+    if (error) throw error;
+    await logAdminAction(req, 'delete_post', 'post', req.params.id, { reason });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/comments', adminAuthRequired, async (req, res) => {
+  try {
+    const { data: comments, error } = await supabase.from('comments').select('*').order('created_at', { ascending: false }).limit(300);
+    if (error) throw error;
+    const m = await usernameMap((comments || []).map((c) => c.user_id));
+    res.json({ success: true, data: (comments || []).map((c) => ({ ...c, username: m[c.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.put('/api/crm/comments/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const content = (req.body && req.body.content) || '';
+    const { data: cm } = await supabase.from('comments').select('user_id').eq('id', req.params.id);
+    const { error } = await supabase.from('comments').update({ content }).eq('id', req.params.id);
+    if (error) throw error;
+    if (cm?.[0]) {
+      const text = 'Один из ваших комментариев был изменён администратором.';
+      await createNotification(cm[0].user_id, null, 'admin', text);
+      await sendSystemMessage(cm[0].user_id, text).catch(() => {});
+    }
+    await logAdminAction(req, 'edit_comment', 'comment', req.params.id, { content });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/crm/comments/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const { data: cm } = await supabase.from('comments').select('user_id').eq('id', req.params.id);
+    if (cm?.[0]) {
+      const text = `Ваш комментарий был удалён администратором.${reason ? ' Причина: ' + reason : ''}`;
+      await createNotification(cm[0].user_id, null, 'admin', text);
+      await sendSystemMessage(cm[0].user_id, text).catch(() => {});
+    }
+    const { error } = await supabase.from('comments').delete().eq('id', req.params.id);
+    if (error) throw error;
+    await logAdminAction(req, 'delete_comment', 'comment', req.params.id, { reason });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/stories', adminAuthRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('stories').select('*').order('created_at', { ascending: false }).limit(300);
+    if (error) throw error;
+    const m = await usernameMap((data || []).map((s) => s.user_id));
+    res.json({ success: true, data: (data || []).map((s) => ({ ...s, username: m[s.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/crm/stories/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const { data: st } = await supabase.from('stories').select('user_id').eq('id', req.params.id);
+    if (st?.[0]) {
+      const text = `Ваша история была удалена администратором.${reason ? ' Причина: ' + reason : ''}`;
+      await createNotification(st[0].user_id, null, 'admin', text);
+      await sendSystemMessage(st[0].user_id, text).catch(() => {});
+    }
+    const { error } = await supabase.from('stories').delete().eq('id', req.params.id);
+    if (error) throw error;
+    await logAdminAction(req, 'delete_story', 'story', req.params.id, { reason });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/reels', adminAuthRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('reels').select('*').order('created_at', { ascending: false }).limit(300);
+    if (error) throw error;
+    const m = await usernameMap((data || []).map((r) => r.user_id));
+    res.json({ success: true, data: (data || []).map((r) => ({ ...r, username: m[r.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/crm/reels/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const reason = (req.body && req.body.reason) || '';
+    const { data: rl } = await supabase.from('reels').select('user_id').eq('id', req.params.id);
+    if (rl?.[0]) {
+      const text = `Ваш рилс был удалён администратором.${reason ? ' Причина: ' + reason : ''}`;
+      await createNotification(rl[0].user_id, null, 'admin', text);
+      await sendSystemMessage(rl[0].user_id, text).catch(() => {});
+    }
+    const { error } = await supabase.from('reels').delete().eq('id', req.params.id);
+    if (error) throw error;
+    await logAdminAction(req, 'delete_reel', 'reel', req.params.id, { reason });
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/run-bots', adminAuthRequired, async (req, res) => {
+  try {
+    const posted = await runBots(supabase);
+    await logAdminAction(req, 'run_bots', null, null, { posted });
+    res.json({ success: true, posted });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── Reports review ───────────────────────────────────────────────────────
+app.get('/api/crm/reports', adminAuthRequired, async (req, res) => {
+  try {
+    const status = (req.query.status || 'open').toString();
+    let q = supabase.from('reports').select('*').order('created_at', { ascending: false }).limit(300);
+    if (status !== 'all') q = q.eq('status', status);
+    const { data, error } = await q;
+    if (error) throw error;
+    const m = await usernameMap((data || []).map((r) => r.reporter_id));
+    res.json({ success: true, data: (data || []).map((r) => ({ ...r, reporter_username: m[r.reporter_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/reports/:id/resolve', adminAuthRequired, async (req, res) => {
+  try {
+    const { error } = await supabase.from('reports').update({ status: 'resolved' }).eq('id', req.params.id);
+    if (error) throw error;
+    await logAdminAction(req, 'resolve_report', 'report', req.params.id, {});
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/reports/:id/dismiss', adminAuthRequired, async (req, res) => {
+  try {
+    const { error } = await supabase.from('reports').update({ status: 'dismissed' }).eq('id', req.params.id);
+    if (error) throw error;
+    await logAdminAction(req, 'dismiss_report', 'report', req.params.id, {});
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── Verification requests review ─────────────────────────────────────────
+app.get('/api/crm/verification-requests', adminAuthRequired, async (req, res) => {
+  try {
+    const status = (req.query.status || 'pending').toString();
+    let q = supabase.from('verification_requests').select('*').order('created_at', { ascending: false }).limit(300);
+    if (status !== 'all') q = q.eq('status', status);
+    const { data, error } = await q;
+    if (error) throw error;
+    const m = await usernameMap((data || []).map((r) => r.user_id));
+    res.json({ success: true, data: (data || []).map((r) => ({ ...r, username: m[r.user_id] || 'Unknown' })) });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/verification-requests/:id/approve', adminAuthRequired, async (req, res) => {
+  try {
+    const { data: reqRow } = await supabase.from('verification_requests').select('user_id').eq('id', req.params.id);
+    if (!reqRow?.[0]) return res.json({ success: false, error: 'Not found' });
+    await supabase.from('verification_requests').update({ status: 'approved' }).eq('id', req.params.id);
+    await supabase.from('users').update({ is_verified: true }).eq('id', reqRow[0].user_id);
+    const text = 'Ваш аккаунт верифицирован ✓';
+    await createNotification(reqRow[0].user_id, null, 'admin', text);
+    await sendSystemMessage(reqRow[0].user_id, text).catch(() => {});
+    await logAdminAction(req, 'approve_verification', 'user', reqRow[0].user_id, {});
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/verification-requests/:id/reject', adminAuthRequired, async (req, res) => {
+  try {
+    const { data: reqRow } = await supabase.from('verification_requests').select('user_id').eq('id', req.params.id);
+    if (!reqRow?.[0]) return res.json({ success: false, error: 'Not found' });
+    await supabase.from('verification_requests').update({ status: 'rejected' }).eq('id', req.params.id);
+    const text = 'Ваша заявка на верификацию отклонена.';
+    await createNotification(reqRow[0].user_id, null, 'admin', text);
+    await sendSystemMessage(reqRow[0].user_id, text).catch(() => {});
+    await logAdminAction(req, 'reject_verification', 'user', reqRow[0].user_id, {});
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── Device/IP session tracking (called by the app itself, not admin) ────────
+// Fire-and-forget from the client right after login — never blocks/breaks
+// anything if it fails, purely additive telemetry for the CRM panel.
+app.post('/api/session-info', authRequired, async (req, res) => {
+  try {
+    const { device_model, os_version, app_version, platform } = req.body || {};
+    const ip = (req.headers['x-forwarded-for'] || '').toString().split(',')[0].trim() || req.ip || '';
+    await supabase.from('user_sessions').insert([{
+      user_id: req.userId, ip,
+      device_model: (device_model || '').toString().slice(0, 120),
+      os_version: (os_version || '').toString().slice(0, 60),
+      app_version: (app_version || '').toString().slice(0, 30),
+      platform: (platform || '').toString().slice(0, 30),
+    }]);
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
