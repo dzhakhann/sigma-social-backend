@@ -701,6 +701,18 @@ async function sweepExpiredNotes() {
   try { await supabase.from('notes').delete().lt('expires_at', new Date().toISOString()); } catch (_) {}
 }
 
+// Fully-delivered group messages are kept around briefly after every member
+// has acked (see the ack endpoint) so reactions/seen-by still have a row to
+// attach to — reaped here on a delay rather than kept forever, same
+// opportunistic-sweep pattern as notes above.
+const GROUP_MESSAGE_GRACE_MS = 48 * 60 * 60 * 1000; // 48h
+async function sweepFullyAckedGroupMessages() {
+  try {
+    await supabase.from('group_messages').delete()
+      .lt('fully_acked_at', new Date(Date.now() - GROUP_MESSAGE_GRACE_MS).toISOString());
+  } catch (_) {}
+}
+
 app.post('/api/notes', authRequired, async (req, res) => {
   const text = (req.body.text || '').toString().trim().slice(0, NOTE_MAX_LEN);
   if (!text) return res.json({ success: false, error: 'Empty note' });
@@ -2864,6 +2876,7 @@ app.post('/api/groups/:id/messages/ack', authRequired, async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, 500) : [];
   if (!ids.length) return res.json({ success: true });
   try {
+    sweepFullyAckedGroupMessages(); // fire-and-forget, opportunistic
     const { data: rows } = await supabase.from('group_messages').select('id, pending_acks')
       .eq('group_id', req.params.id).in('id', ids);
     // "Seen by" has nowhere to live once a fully-acked row is deleted (this
@@ -2875,7 +2888,23 @@ app.post('/api/groups/:id/messages/ack', authRequired, async (req, res) => {
     for (const row of rows || []) {
       const remaining = (row.pending_acks || []).filter((id) => id !== req.userId);
       if (remaining.length === 0) {
-        await supabase.from('group_messages').delete().eq('id', row.id);
+        // Fully delivered — nobody still needs it RELAYED (GET .../messages
+        // already only returns rows where pending_acks includes the caller,
+        // so an empty array drops out of everyone's queue exactly like a
+        // delete would). But don't hard-delete yet: reacting to a message
+        // needs the row to still exist, and in a small/fast-to-ack group this
+        // point can arrive within seconds of sending — long before anyone
+        // would realistically want to react. Give it a grace window instead;
+        // sweepFullyAckedGroupMessages() reaps it after that.
+        const { error: graceErr } = await supabase.from('group_messages')
+          .update({ pending_acks: [], fully_acked_at: new Date().toISOString() })
+          .eq('id', row.id);
+        // Migration not run yet — fall back to the pre-grace-period behavior
+        // (immediate delete) rather than leaving the row stuck undeleted
+        // with no timestamp to ever sweep it by.
+        if (graceErr && /fully_acked_at/.test(graceErr.message || '')) {
+          await supabase.from('group_messages').delete().eq('id', row.id);
+        }
       } else {
         await supabase.from('group_messages').update({ pending_acks: remaining }).eq('id', row.id);
       }
