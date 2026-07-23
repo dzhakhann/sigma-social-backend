@@ -916,6 +916,109 @@ app.get('/api/goals/wrapped', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── DUELS (goal races between two friends) ────────────────────────────────
+// Each side tracks its OWN progress — no shared/contested state, so there's
+// nothing to reconcile if both update around the same time.
+
+app.get('/api/duels', authRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('duels').select('*')
+      .or(`challenger_id.eq.${req.userId},opponent_id.eq.${req.userId}`)
+      .order('created_at', { ascending: false });
+    if (error) throw error;
+    const ids = new Set();
+    (data || []).forEach((d) => { ids.add(d.challenger_id); ids.add(d.opponent_id); });
+    const names = await usernameMap([...ids]);
+    const { data: users } = await supabase.from('users').select('id, avatar_url').in('id', [...ids]);
+    const avatars = {};
+    (users || []).forEach((u) => { avatars[u.id] = u.avatar_url; });
+    const enriched = (data || []).map((d) => ({
+      ...d,
+      challenger_username: names[d.challenger_id],
+      challenger_avatar: avatars[d.challenger_id],
+      opponent_username: names[d.opponent_id],
+      opponent_avatar: avatars[d.opponent_id],
+    }));
+    res.json({ success: true, data: enriched });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/duels', authRequired, async (req, res) => {
+  const { title, category, opponent_id } = req.body;
+  if (!title || !title.trim()) return res.json({ success: false, error: 'Title required' });
+  if (!opponent_id || opponent_id === req.userId) return res.json({ success: false, error: 'Invalid opponent' });
+  try {
+    const { data, error } = await supabase.from('duels').insert([{
+      challenger_id: req.userId, opponent_id,
+      title: title.trim(), category: category || 'personal',
+    }]).select().single();
+    if (error) throw error;
+    const from = (await usernameMap([req.userId]))[req.userId] || 'Someone';
+    await createNotification(opponent_id, req.userId, 'duel_invite',
+      `${from} challenged you: "${title.trim()}"`, null);
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/duels/:id/respond', authRequired, async (req, res) => {
+  const accept = req.body.accept === true;
+  try {
+    const { data: d } = await supabase.from('duels').select('*').eq('id', req.params.id).single();
+    if (!d || d.opponent_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    if (d.status !== 'pending') return res.json({ success: false, error: 'Already responded' });
+    const status = accept ? 'active' : 'declined';
+    const { data, error } = await supabase.from('duels').update({ status }).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    if (accept) {
+      const from = (await usernameMap([req.userId]))[req.userId] || 'Someone';
+      await createNotification(d.challenger_id, req.userId, 'duel_accepted',
+        `${from} accepted your challenge: "${d.title}"`, null);
+    }
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/duels/:id/progress', authRequired, async (req, res) => {
+  const progress = Math.max(0, Math.min(100, Number(req.body.progress) || 0));
+  try {
+    const { data: d } = await supabase.from('duels').select('*').eq('id', req.params.id).single();
+    if (!d) return res.json({ success: false, error: 'Not found' });
+    const isChallenger = d.challenger_id === req.userId;
+    const isOpponent = d.opponent_id === req.userId;
+    if (!isChallenger && !isOpponent) return res.status(403).json({ success: false, error: 'Forbidden' });
+    if (d.status !== 'active') return res.json({ success: false, error: 'Duel not active' });
+    const update = isChallenger
+      ? { challenger_progress: progress }
+      : { opponent_progress: progress };
+    if (progress >= 100) {
+      update.status = 'completed';
+      update.winner_id = req.userId;
+      update.completed_at = new Date().toISOString();
+    }
+    const { data, error } = await supabase.from('duels').update(update).eq('id', req.params.id).select().single();
+    if (error) throw error;
+    if (update.status === 'completed') {
+      const otherId = isChallenger ? d.opponent_id : d.challenger_id;
+      const from = (await usernameMap([req.userId]))[req.userId] || 'Someone';
+      await createNotification(otherId, req.userId, 'duel_won',
+        `${from} won your duel: "${d.title}"`, null);
+      awardAura(req.userId, 30); // winning a duel
+    }
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/duels/:id', authRequired, async (req, res) => {
+  try {
+    const { data: d } = await supabase.from('duels').select('challenger_id, opponent_id, status').eq('id', req.params.id).single();
+    if (!d || (d.challenger_id !== req.userId && d.opponent_id !== req.userId)) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    await supabase.from('duels').delete().eq('id', req.params.id);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── AI (Google Gemini — key stays on the server, never in the app) ───────────
 const GEMINI_KEY = process.env.GEMINI_API_KEY || '';
 const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
