@@ -2113,12 +2113,126 @@ app.get('/api/news', async (req, res) => {
 // happen to be a real YouTube handle" needs. Recent uploads come from the
 // same free RSS-feed helper (fetchYtVideos) the Газета feature already uses
 // — zero additional quota. See resolveYtChannel/fetchYtVideos above.
+// ─── YouTube keyword video search ────────────────────────────────────────────
+// The Data API's search.list costs 100 units — at 10k/day that's ~100 searches
+// for the WHOLE app per day, so it stays off-limits (see the quota rule in
+// the YouTube notes). Instead: scrape the public results page for video ids
+// (0 quota, no key) and then resolve those ids through videos.list, which is
+// 1 unit per batch of 50 and gives clean titles/thumbnails/channel names.
+// Cached per query so a repeated search costs nothing at all.
+const _ytSearchCache = new Map(); // query → { ts, data }
+const YT_SEARCH_CACHE_MS = 6 * 60 * 60 * 1000; // 6h
+
+async function ytVideosByIds(ids) {
+  if (!ids.length) return [];
+  if (!YOUTUBE_API_KEY) {
+    // No key: still return something playable — the player only needs the id.
+    return ids.map((id) => ({
+      id: 'yt_' + id, videoId: id, title: '', channel: '',
+      image: `https://i.ytimg.com/vi/${id}/hqdefault.jpg`,
+      link: `https://www.youtube.com/watch?v=${id}`,
+    }));
+  }
+  const r = await fetch(
+    'https://www.googleapis.com/youtube/v3/videos'
+    + `?part=snippet&id=${ids.join(',')}&key=${YOUTUBE_API_KEY}`);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || 'yt api error');
+  return (j.items || []).map((v) => ({
+    id: 'yt_' + v.id,
+    videoId: v.id,
+    title: v.snippet?.title || '',
+    channel: v.snippet?.channelTitle || '',
+    image: v.snippet?.thumbnails?.high?.url || v.snippet?.thumbnails?.default?.url
+      || `https://i.ytimg.com/vi/${v.id}/hqdefault.jpg`,
+    link: `https://www.youtube.com/watch?v=${v.id}`,
+  }));
+}
+
+// Hard cap on the EXPENSIVE fallback below, so a broken scrape can never
+// silently burn the whole daily quota. 40 × 100 = 4000 units/day worst case,
+// leaving the rest for trending/news/channel lookups (all 1 unit each).
+let _ytSearchApiCalls = 0;
+let _ytSearchApiDay = '';
+const YT_SEARCH_API_DAILY_MAX = 40;
+
+async function ytSearchViaApi(query, limit) {
+  if (!YOUTUBE_API_KEY) return [];
+  const today = new Date().toISOString().slice(0, 10);
+  if (_ytSearchApiDay !== today) { _ytSearchApiDay = today; _ytSearchApiCalls = 0; }
+  if (_ytSearchApiCalls >= YT_SEARCH_API_DAILY_MAX) return [];
+  _ytSearchApiCalls++;
+  const r = await fetch(
+    'https://www.googleapis.com/youtube/v3/search'
+    + `?part=snippet&type=video&maxResults=${limit}`
+    + `&q=${encodeURIComponent(query)}&key=${YOUTUBE_API_KEY}`);
+  const j = await r.json();
+  if (j.error) throw new Error(j.error.message || 'yt api error');
+  return (j.items || []).map((v) => ({
+    id: 'yt_' + v.id.videoId,
+    videoId: v.id.videoId,
+    title: v.snippet?.title || '',
+    channel: v.snippet?.channelTitle || '',
+    image: v.snippet?.thumbnails?.high?.url
+      || `https://i.ytimg.com/vi/${v.id.videoId}/hqdefault.jpg`,
+    link: `https://www.youtube.com/watch?v=${v.id.videoId}`,
+  }));
+}
+
+async function ytSearchVideos(query, limit = 10) {
+  const key = query.toLowerCase();
+  const hit = _ytSearchCache.get(key);
+  if (hit && Date.now() - hit.ts < YT_SEARCH_CACHE_MS) return hit.data;
+  let data = [];
+  try {
+    const r = await fetch(
+      'https://www.youtube.com/results?search_query=' + encodeURIComponent(query),
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
+          // Skips the EU consent interstitial YouTube shows datacenter IPs —
+          // without it Render can get a stripped page with no video data.
+          'Cookie': 'CONSENT=YES+cb.20240101-00-p0.en+FX+000',
+        },
+      });
+    const html = await r.text();
+    // Ids appear many times over (renderer + thumbnail + endpoint) — dedupe
+    // and keep the page's own ordering, which is YouTube's relevance ranking.
+    const ids = [];
+    const seen = new Set();
+    for (const m of html.matchAll(/"videoId":"([\w-]{11})"/g)) {
+      if (!seen.has(m[1])) { seen.add(m[1]); ids.push(m[1]); }
+      if (ids.length >= limit) break;
+    }
+    data = await ytVideosByIds(ids);
+  } catch (_) { /* fall through to the API */ }
+  // Scrape blocked/changed → pay for the real search endpoint, rate-capped.
+  if (!data.length) {
+    try { data = await ytSearchViaApi(query, limit); } catch (_) {}
+  }
+  if (data.length) _ytSearchCache.set(key, { ts: Date.now(), data });
+  if (_ytSearchCache.size > 300) _ytSearchCache.clear();
+  return data;
+}
+
 app.get('/api/youtube/channel', async (req, res) => {
   const handle = (req.query.handle || '').toString().trim();
   if (!handle) return res.json({ success: true, data: { found: false, videos: [] } });
   try {
-    const videos = await fetchYtVideos(handle, 8);
-    res.json({ success: true, data: { found: videos.length > 0, videos } });
+    // Exact @handle match first (1 unit) — if the query IS someone's channel
+    // name, their own recent uploads are the most relevant answer. Otherwise
+    // fall through to a normal keyword video search, which is what a query
+    // like "The Weeknd" or "Timati" needs (those aren't handles, so the old
+    // handle-only lookup always came back empty).
+    let videos = [];
+    try { videos = await fetchYtVideos(handle, 8); } catch (_) {}
+    let kind = 'channel';
+    if (!videos.length) {
+      videos = await ytSearchVideos(handle, 10);
+      kind = 'search';
+    }
+    res.json({ success: true, data: { found: videos.length > 0, kind, videos } });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -2896,6 +3010,15 @@ app.get('/api/messages/:chatId', authRequired, async (req, res) => {
       .eq('chat_id', req.params.chatId)
       .neq('sender_id', req.userId)
       .eq('is_read', false);
+    // Opening the chat also settles the other side's chat-list tick to ✓✓
+    // (best-effort; a missing column just leaves it at ✓).
+    try {
+      const { data: c0 } = await supabase.from('chats')
+        .select('last_sender_id').eq('id', req.params.chatId);
+      if (c0?.[0] && c0[0].last_sender_id && c0[0].last_sender_id !== req.userId) {
+        await supabase.from('chats').update({ last_read: true }).eq('id', req.params.chatId);
+      }
+    } catch (_) {}
     // Only the two participants care — never broadcast chat events app-wide.
     for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
       emitToUser(uid, 'messages_read', { chatId: req.params.chatId, reader: req.userId });
@@ -2949,7 +3072,14 @@ app.post('/api/messages', authRequired, async (req, res) => {
     // its duration): show a label instead of a blank line.
     const previews = { image: '📷 Photo', video: '🎥 Video', voice: '🎤 Voice', gif: 'GIF', sticker: '💟 Sticker' };
     const last = previews[message_type] || content || '';
-    await supabase.from('chats').update({ last_message: last, updated_at: new Date().toISOString() }).eq('id', chat_id);
+    // last_sender_id/last_read drive the ✓/✓✓ tick next to the preview in
+    // the chat LIST (Telegram shows one there, not just inside the chat).
+    // Same catch-and-retry-without-the-new-columns fallback every other
+    // schema change here uses, so an un-run migration can't break sending.
+    const chatPatch = { last_message: last, updated_at: new Date().toISOString() };
+    const { error: patchErr } = await supabase.from('chats')
+      .update({ ...chatPatch, last_sender_id: sender_id, last_read: false }).eq('id', chat_id);
+    if (patchErr) await supabase.from('chats').update(chatPatch).eq('id', chat_id);
     // Deliver to the two participants only (was a global broadcast).
     for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
       emitToUser(uid, 'receive_message', data);
@@ -2989,6 +3119,9 @@ app.post('/api/messages/ack', authRequired, async (req, res) => {
       throw error;
     }
     const other = chat[0].user1_id === req.userId ? chat[0].user2_id : chat[0].user1_id;
+    // I just picked up the other side's messages → their chat-list row flips
+    // to ✓✓ (best-effort; ignored if the migration hasn't been run).
+    try { await supabase.from('chats').update({ last_read: true }).eq('id', chat_id); } catch (_) {}
     // Delivered-and-read receipt for the sender's ✓✓ (their copy is local).
     emitToUser(other, 'messages_read', { chatId: chat_id, reader: req.userId, ids: list });
     res.json({ success: true });
@@ -3390,6 +3523,34 @@ app.delete('/api/groups/:groupId/messages/:messageId', authRequired, async (req,
     if (m[0].sender_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
     await supabase.from('group_messages').delete().eq('id', req.params.messageId);
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// Edit your own group message — same ownership-checked shape as the 1:1
+// PUT /api/messages/:messageId. The edited text is broadcast to every member
+// so open chats update live instead of waiting for the next poll; a device
+// that was offline picks it up from the message-sync endpoint above.
+app.put('/api/groups/:groupId/messages/:messageId', authRequired, async (req, res) => {
+  const { content } = req.body;
+  if (!content || !content.toString().trim()) return res.json({ success: false, error: 'Empty message' });
+  try {
+    const { data: m } = await supabase.from('group_messages').select('sender_id').eq('id', req.params.messageId);
+    if (!m || m.length === 0) return res.json({ success: false, error: 'Not found' });
+    if (m[0].sender_id !== req.userId) return res.status(403).json({ success: false, error: 'Forbidden' });
+    const text = content.toString().trim();
+    let { data, error } = await supabase.from('group_messages')
+      .update({ content: text, is_edited: true }).eq('id', req.params.messageId).select().single();
+    if (error) {
+      ({ data, error } = await supabase.from('group_messages')
+        .update({ content: text }).eq('id', req.params.messageId).select().single());
+    }
+    if (error) throw error;
+    const members = await groupMemberIds(req.params.groupId);
+    for (const uid of members) {
+      emitToUser(uid, 'group_message_edited',
+        { group_id: req.params.groupId, message_id: req.params.messageId, content: text });
+    }
+    res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
