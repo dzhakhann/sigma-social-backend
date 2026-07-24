@@ -2940,6 +2940,31 @@ app.post('/api/reels/:reelId/like', authRequired, async (req, res) => {
 
 // ─── CHATS ────────────────────────────────────────────────────────────────────
 
+// Writes the chat-list row after a message: preview text, recency ordering,
+// and the ✓/✓✓ tick fields.
+//
+// Degrades COLUMN BY COLUMN on purpose. A single `.update()` fails entirely if
+// ANY column in it is missing, and supabase-js reports that in `error` rather
+// than throwing — so the old one-shot write (which always included
+// `updated_at`) silently wrote NOTHING on a database where the
+// chats_updated_at migration hadn't been run. That's why chat previews showed
+// "Нет сообщений" and the list never sorted by recency: not a UI bug, a write
+// that had been failing invisibly the whole time. Never fold these back into
+// one update, and never drop the error checks.
+async function updateChatPreview(chatId, lastMessage, senderId) {
+  const attempts = [
+    { last_message: lastMessage, updated_at: new Date().toISOString(),
+      last_sender_id: senderId, last_read: false },          // everything
+    { last_message: lastMessage, last_sender_id: senderId, last_read: false },
+    { last_message: lastMessage, updated_at: new Date().toISOString() },
+    { last_message: lastMessage },                            // bare minimum
+  ];
+  for (const patch of attempts) {
+    const { error } = await supabase.from('chats').update(patch).eq('id', chatId);
+    if (!error) return;
+  }
+}
+
 app.get('/api/chats', authRequired, async (req, res) => {
   const userId = req.userId;
   try {
@@ -3076,10 +3101,7 @@ app.post('/api/messages', authRequired, async (req, res) => {
     // the chat LIST (Telegram shows one there, not just inside the chat).
     // Same catch-and-retry-without-the-new-columns fallback every other
     // schema change here uses, so an un-run migration can't break sending.
-    const chatPatch = { last_message: last, updated_at: new Date().toISOString() };
-    const { error: patchErr } = await supabase.from('chats')
-      .update({ ...chatPatch, last_sender_id: sender_id, last_read: false }).eq('id', chat_id);
-    if (patchErr) await supabase.from('chats').update(chatPatch).eq('id', chat_id);
+    await updateChatPreview(chat_id, last, sender_id);
     // Deliver to the two participants only (was a global broadcast).
     for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
       emitToUser(uid, 'receive_message', data);
@@ -3908,7 +3930,7 @@ async function sendSystemMessage(userId, content) {
     .insert([{ chat_id: chat.id, sender_id: systemId, content, message_type: 'text' }])
     .select().single();
   if (msgErr) throw msgErr;
-  await supabase.from('chats').update({ last_message: content, updated_at: new Date().toISOString() }).eq('id', chat.id);
+  await updateChatPreview(chat.id, content, systemId);
   emitToUser(userId, 'receive_message', msg);
   return msg;
 }
