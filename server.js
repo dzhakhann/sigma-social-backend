@@ -223,6 +223,38 @@ async function createNotification(userId, fromUserId, type, message, postId = nu
   } catch (_) {}
 }
 
+/// Push for a new chat message.
+///
+/// Deliberately does NOT insert into `notifications`: that table is the
+/// activity feed (likes/comments/follows), and every message landing there
+/// would bury the feed and inflate its unread badge. Messages had no push at
+/// all before this — the socket only told an already-open app, so a closed one
+/// learned nothing, which is why "уведомления не работают".
+///
+/// `chat_id`/`group_id` ride along so the client can offer inline quick reply
+/// and open the right conversation on tap.
+async function notifyMessage(recipientId, senderId, text, extra) {
+  if (!recipientId || String(recipientId) === String(senderId)) return;
+  try {
+    const { data: fromRows } = await supabase.from('users')
+      .select('username, avatar_url').eq('id', senderId);
+    const payload = {
+      type: extra.group_id ? 'group_message' : 'message',
+      message: text || '',
+      from_user_id: senderId,
+      from_username: fromRows?.[0]?.username || 'Sigmacta',
+      from_avatar: fromRows?.[0]?.avatar_url || null,
+      ...extra,
+    };
+    emitToUser(recipientId, 'notification', payload);
+    const { data: rec } = await supabase.from('users')
+      .select('fcm_token').eq('id', recipientId);
+    if (rec?.[0]?.fcm_token) {
+      sendFcm(recipientId, rec[0].fcm_token, payload);
+    }
+  } catch (_) {}
+}
+
 // ─── AURA: user activity score (gamification). Small increments per action. ────
 // Bulk-notify every follower of `userId` (fire-and-forget from the caller —
 // publishing a post/story shouldn't wait on however many thousands of
@@ -3117,6 +3149,10 @@ app.post('/api/messages', authRequired, async (req, res) => {
     for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
       emitToUser(uid, 'receive_message', data);
     }
+    // …and actually notify the recipient. `last` rather than raw content so a
+    // photo/voice message reads as "🎤 Voice" instead of arriving blank.
+    const other = chat[0].user1_id === sender_id ? chat[0].user2_id : chat[0].user1_id;
+    notifyMessage(other, sender_id, last, { chat_id, message_id: data.id });
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -3466,6 +3502,14 @@ app.post('/api/groups/:id/messages', authRequired, async (req, res) => {
       updated_at: new Date().toISOString(),
     }).eq('id', req.params.id);
     for (const uid of pending_acks) emitToUser(uid, 'receive_group_message', data);
+    // pending_acks is already everyone-but-the-sender, so it's exactly the set
+    // that should be notified.
+    const groupName = (await supabase.from('groups')
+      .select('name').eq('id', req.params.id)).data?.[0]?.name || '';
+    for (const uid of pending_acks) {
+      notifyMessage(uid, req.userId, previews[message_type] || content || '',
+        { group_id: req.params.id, group_name: groupName, message_id: data.id });
+    }
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
