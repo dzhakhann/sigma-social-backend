@@ -13,6 +13,7 @@ import { RECOVERY_WORDS } from './wordlist.js';
 import { runBots } from './bots.js';
 import { initializeApp as initFirebaseApp, cert as firebaseCert } from 'firebase-admin/app';
 import { getMessaging } from 'firebase-admin/messaging';
+import { JWT } from 'google-auth-library';
 
 dotenv.config();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -4369,6 +4370,141 @@ app.post('/api/crm/verification-requests/:id/reject', adminAuthRequired, async (
     await logAdminAction(req, 'reject_verification', 'user', reqRow[0].user_id, {});
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── Google Play billing ────────────────────────────────────────────────────
+// A purchase is verified SERVER-SIDE against the Play Developer API and never
+// trusted from the client. A client-reported "I bought it" is trivially forged
+// with a patched APK, so the only thing the app sends is the purchase token —
+// everything that matters is read back from Google.
+
+const PLAY_PACKAGE = process.env.PLAY_PACKAGE_NAME || 'com.sigmacta.app';
+const PLAY_PRODUCT_ID = 'sigmacta_pro_monthly';
+
+/// Service-account credentials for the Play Developer API, as JSON in
+/// GOOGLE_PLAY_SERVICE_ACCOUNT. Absent in local dev, which is why every path
+/// below degrades to an explicit refusal rather than to "granted".
+let _playJwt = null;
+function playAuth() {
+  if (_playJwt) return _playJwt;
+  const raw = process.env.GOOGLE_PLAY_SERVICE_ACCOUNT;
+  if (!raw) return null;
+  try {
+    const key = JSON.parse(raw);
+    _playJwt = new JWT({
+      email: key.client_email,
+      key: key.private_key,
+      scopes: ['https://www.googleapis.com/auth/androidpublisher'],
+    });
+    return _playJwt;
+  } catch (e) {
+    console.error('[billing] bad GOOGLE_PLAY_SERVICE_ACCOUNT:', e.message);
+    return null;
+  }
+}
+
+async function logBilling(userId, productId, token, status, detail) {
+  try {
+    await supabase.from('billing_events').insert([{
+      user_id: userId || null,
+      product_id: productId || null,
+      purchase_token: token || null,
+      status,
+      detail: detail || {},
+    }]);
+  } catch (_) {}
+}
+
+/// Verifies a subscription purchase and extends the user's Pro period.
+///
+/// Uses subscriptionsv2, which reports the whole subscription rather than a
+/// single base plan — v1 has been deprecated and doesn't describe multi-plan
+/// subscriptions correctly.
+app.post('/api/billing/verify', authRequired, async (req, res) => {
+  const token = (req.body?.purchase_token || '').toString().trim();
+  const productId = (req.body?.product_id || PLAY_PRODUCT_ID).toString();
+  if (!token) return res.json({ success: false, error: 'no_token' });
+
+  const auth = playAuth();
+  if (!auth) {
+    // Explicitly NOT granting anything. Falling back to "trust the client"
+    // here would mean a patched app could mint unlimited subscriptions.
+    await logBilling(req.userId, productId, token, 'error', { reason: 'no_credentials' });
+    return res.json({ success: false, error: 'verification_unavailable' });
+  }
+
+  try {
+    // One token, one account — checked before contacting Google so a replayed
+    // token from another device is rejected cheaply.
+    const { data: owner } = await supabase.from('users')
+      .select('id').eq('play_purchase_token', token);
+    if (owner?.[0] && owner[0].id !== req.userId) {
+      await logBilling(req.userId, productId, token, 'rejected', { reason: 'token_belongs_to_other_user' });
+      return res.json({ success: false, error: 'token_in_use' });
+    }
+
+    const { token: access } = await auth.getAccessToken();
+    const url = `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/`
+      + `${encodeURIComponent(PLAY_PACKAGE)}/purchases/subscriptionsv2/tokens/`
+      + `${encodeURIComponent(token)}`;
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${access}` } });
+    const sub = await r.json();
+    if (!r.ok) {
+      await logBilling(req.userId, productId, token, 'rejected', { http: r.status, body: sub });
+      return res.json({ success: false, error: 'invalid_purchase' });
+    }
+
+    // ACTIVE or IN_GRACE_PERIOD both mean "entitled right now". A cancelled but
+    // not-yet-expired subscription is still ACTIVE until its expiry, which is
+    // why expiry drives the grant rather than the cancellation flag.
+    const state = sub.subscriptionState;
+    const entitled = state === 'SUBSCRIPTION_STATE_ACTIVE'
+      || state === 'SUBSCRIPTION_STATE_IN_GRACE_PERIOD';
+    const line = (sub.lineItems || [])[0];
+    const expiry = line?.expiryTime ? new Date(line.expiryTime) : null;
+
+    if (!entitled || !expiry || expiry.getTime() < Date.now()) {
+      await logBilling(req.userId, productId, token, 'rejected', { state, expiry: line?.expiryTime });
+      return res.json({ success: false, error: 'not_active', state });
+    }
+
+    // Never shorten an existing entitlement: a user who redeemed a long promo
+    // code and then subscribed keeps whichever runs longer.
+    const { data: rows } = await supabase.from('users')
+      .select('pro_until').eq('id', req.userId);
+    const current = rows?.[0]?.pro_until ? new Date(rows[0].pro_until) : null;
+    const until = (current && current > expiry) ? current : expiry;
+
+    await supabase.from('users').update({
+      is_pro: true,
+      pro_until: until.toISOString(),
+      pro_source: 'play',
+      play_purchase_token: token,
+    }).eq('id', req.userId);
+
+    // ACKNOWLEDGE. Play auto-refunds any purchase left unacknowledged for three
+    // days, so skipping this silently loses the money days after a "successful"
+    // purchase. Best-effort: the entitlement is already granted, and Play
+    // tolerates a repeated acknowledge.
+    try {
+      if (line?.productId && !sub.acknowledgementState?.includes('ACKNOWLEDGED')) {
+        await fetch(
+          `https://androidpublisher.googleapis.com/androidpublisher/v3/applications/`
+          + `${encodeURIComponent(PLAY_PACKAGE)}/purchases/subscriptions/`
+          + `${encodeURIComponent(line.productId)}/tokens/${encodeURIComponent(token)}:acknowledge`,
+          { method: 'POST', headers: { Authorization: `Bearer ${access}` } },
+        );
+      }
+    } catch (e) {
+      console.error('[billing] acknowledge failed', e.message);
+    }
+
+    await logBilling(req.userId, productId, token, 'verified', { state, expiry: line?.expiryTime });
+    res.json({ success: true, data: { pro_until: until.toISOString() } });
+  } catch (e) {
+    await logBilling(req.userId, productId, token, 'error', { message: e.message });
+    res.json({ success: false, error: e.message });
+  }
 });
 
 // ─── Custom Pro badge ───────────────────────────────────────────────────────
