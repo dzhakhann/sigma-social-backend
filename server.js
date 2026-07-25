@@ -3017,17 +3017,31 @@ app.get('/api/chats', authRequired, async (req, res) => {
         .or(`user1_id.eq.${userId},user2_id.eq.${userId}`));
     }
     if (error) throw error;
-    const enriched = await Promise.all((chats || []).map(async (chat) => {
+    // ONE query for every counterpart, not one PER CHAT.
+    //
+    // This used to be a Promise.all of per-chat `users` selects — an N+1: ten
+    // chats meant eleven round-trips to the database before the list could be
+    // returned, which is what made opening Chats feel slow. Now it's two,
+    // regardless of how many chats there are.
+    const otherIds = [...new Set((chats || []).map(
+      (chat) => (chat.user1_id === userId ? chat.user2_id : chat.user1_id)))]
+      .filter(Boolean);
+    const byId = {};
+    if (otherIds.length) {
+      const { data: others } = await supabase.from('users')
+        .select('id, username, avatar_url, is_verified, is_pro, pro_badge_gif')
+        .in('id', otherIds);
+      (others || []).forEach((u) => { byId[u.id] = u; });
+    }
+    const enriched = (chats || []).map((chat) => {
       const otherId = chat.user1_id === userId ? chat.user2_id : chat.user1_id;
-      // is_verified rides along so the chat list can show the badge next to
-      // the name — the same signal every other user-facing list shows.
-      const { data: other } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', otherId);
-      return { ...chat, name: other?.[0]?.username || 'User', avatar: other?.[0]?.avatar_url || null,
-               is_verified: other?.[0]?.is_verified === true,
-               is_pro: other?.[0]?.is_pro === true,
-               pro_badge_gif: other?.[0]?.pro_badge_gif || null,
+      const other = byId[otherId];
+      return { ...chat, name: other?.username || 'User', avatar: other?.avatar_url || null,
+               is_verified: other?.is_verified === true,
+               is_pro: other?.is_pro === true,
+               pro_badge_gif: other?.pro_badge_gif || null,
                other_user_id: otherId };
-    }));
+    });
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -3346,11 +3360,20 @@ app.get('/api/groups', authRequired, async (req, res) => {
     if (error) throw error;
     const roleByGroup = {};
     (memberships || []).forEach((m) => { roleByGroup[m.group_id] = m.role; });
-    const enriched = await Promise.all((groups || []).map(async (g) => ({
+    // Member counts in ONE query, not one per group — same N+1 the 1:1 chat
+    // list had. Both lists are fetched together when Chats opens, so either
+    // one being N+1 slowed the whole screen.
+    const { data: allMembers } = await supabase.from('group_members')
+      .select('group_id').in('group_id', ids);
+    const countByGroup = {};
+    (allMembers || []).forEach((m) => {
+      countByGroup[m.group_id] = (countByGroup[m.group_id] || 0) + 1;
+    });
+    const enriched = (groups || []).map((g) => ({
       ...g,
       my_role: roleByGroup[g.id],
-      member_count: (await groupMemberIds(g.id)).length,
-    })));
+      member_count: countByGroup[g.id] || 0,
+    }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
