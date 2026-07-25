@@ -4403,7 +4403,12 @@ app.put('/api/users/me/pro-badge', authRequired, async (req, res) => {
     const raw = req.body?.url;
     // Null/empty clears it and falls back to the default PRO chip.
     const url = raw ? raw.toString().trim() : null;
-    if (url && !isAllowedBadgeUrl(url)) {
+    // Two accepted shapes in one column: a Giphy URL, or a short emoji. The
+    // length cap is what keeps "emoji" from becoming a free-text field — a
+    // badge is a couple of glyphs, and a paragraph would break every layout it
+    // is rendered into.
+    const isEmoji = url != null && !/^https?:/i.test(url) && url.length <= 12;
+    if (url && !isEmoji && !isAllowedBadgeUrl(url)) {
       return res.json({ success: false, error: 'bad_url' });
     }
 
