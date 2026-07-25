@@ -694,7 +694,7 @@ async function followList(column, otherColumn, targetUserId, callerId, limit, of
   const ids = rows.map((r) => r[column]);
   if (!ids.length) return [];
   const { data: users } = await supabase.from('users')
-    .select('id, username, avatar_url, bio, is_verified').in('id', ids);
+    .select('id, username, avatar_url, bio, is_verified, is_pro, pro_badge_gif').in('id', ids);
   const userMap = {};
   (users || []).forEach((u) => { userMap[u.id] = u; });
   // Does the CALLER follow each of these people? (drives the Follow/Following
@@ -847,13 +847,13 @@ app.get('/api/search/posts', async (req, res) => {
     const { data: posts, error } = await supabase.from('posts').select('*').ilike('content', `%${q}%`).order('created_at', { ascending: false }).limit(30);
     if (error) throw error;
     const enriched = await Promise.all((posts || []).map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', post.user_id);
       let isLiked = false;
       if (userId) {
         const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
         isLiked = !!(like && like.length > 0);
       }
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_pro: user?.[0]?.is_pro === true, pro_badge_gif: user?.[0]?.pro_badge_gif || null, is_liked: isLiked };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -865,7 +865,7 @@ app.get('/api/channels', async (req, res) => {
   try {
     const { data: bots, error } = await supabase
       .from('users')
-      .select('id, username, bio, avatar_url, is_verified, followers_count')
+      .select('id, username, bio, avatar_url, is_verified, is_pro, pro_badge_gif, followers_count')
       .like('email', '%@bots.local')
       .order('followers_count', { ascending: false });
     if (error) throw error;
@@ -2294,10 +2294,10 @@ app.get('/api/posts/following', async (req, res) => {
     const { data: posts, error } = await supabase.from('posts').select('*').in('user_id', ids).is('repost_of', null).order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', post.user_id);
       const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
       const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: !!(like && like.length > 0), comments_count: comments?.length || 0 };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_pro: user?.[0]?.is_pro === true, pro_badge_gif: user?.[0]?.pro_badge_gif || null, is_liked: !!(like && like.length > 0), comments_count: comments?.length || 0 };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -2317,13 +2317,13 @@ app.get('/api/posts/trending', async (req, res) => {
       .limit(20);
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', post.user_id);
       let isLiked = false;
       if (userId) {
         const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
         isLiked = !!(like && like.length > 0);
       }
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_pro: user?.[0]?.is_pro === true, pro_badge_gif: user?.[0]?.pro_badge_gif || null, is_liked: isLiked };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -2336,14 +2336,14 @@ app.get('/api/posts', async (req, res) => {
     const { data: posts, error } = await supabase.from('posts').select('*').is('repost_of', null).order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', post.user_id);
       const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
       let isLiked = false;
       if (userId) {
         const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
         isLiked = !!(like && like.length > 0);
       }
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked, comments_count: comments?.length || 0 };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_pro: user?.[0]?.is_pro === true, pro_badge_gif: user?.[0]?.pro_badge_gif || null, is_liked: isLiked, comments_count: comments?.length || 0 };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -2357,14 +2357,14 @@ app.get('/api/users/:userId/posts', async (req, res) => {
     const { data: posts, error } = await supabase.from('posts').select('*').eq('user_id', targetId).order('created_at', { ascending: false });
     if (error) throw error;
     const enriched = await Promise.all(posts.map(async (post) => {
-      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+      const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', post.user_id);
       const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
       let isLiked = false;
       if (userId) {
         const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
         isLiked = !!(like && like.length > 0);
       }
-      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked, comments_count: comments?.length || 0 };
+      return { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_pro: user?.[0]?.is_pro === true, pro_badge_gif: user?.[0]?.pro_badge_gif || null, is_liked: isLiked, comments_count: comments?.length || 0 };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -2378,14 +2378,14 @@ app.get('/api/posts/:postId', async (req, res) => {
     if (error) throw error;
     const post = rows && rows[0];
     if (!post) return res.json({ success: false, error: 'Not found' });
-    const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', post.user_id);
+    const { data: user } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', post.user_id);
     const { data: comments } = await supabase.from('comments').select('id').eq('post_id', post.id);
     let isLiked = false;
     if (userId) {
       const { data: like } = await supabase.from('likes').select('id').eq('user_id', userId).eq('post_id', post.id);
       isLiked = !!(like && like.length > 0);
     }
-    res.json({ success: true, data: { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_liked: isLiked, comments_count: comments?.length || 0 } });
+    res.json({ success: true, data: { ...post, username: user?.[0]?.username || 'Unknown', user_avatar: user?.[0]?.avatar_url || null, is_verified: user?.[0]?.is_verified === true, is_pro: user?.[0]?.is_pro === true, pro_badge_gif: user?.[0]?.pro_badge_gif || null, is_liked: isLiked, comments_count: comments?.length || 0 } });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
@@ -2851,9 +2851,11 @@ app.get('/api/notifications', authRequired, async (req, res) => {
     const { data, error } = await supabase.from('notifications').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(50);
     if (error) throw error;
     const enriched = await Promise.all((data || []).map(async (n) => {
-      const { data: from } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', n.from_user_id);
+      const { data: from } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', n.from_user_id);
       return { ...n, from_username: from?.[0]?.username, from_avatar: from?.[0]?.avatar_url,
-               from_verified: from?.[0]?.is_verified === true };
+               from_verified: from?.[0]?.is_verified === true,
+               from_is_pro: from?.[0]?.is_pro === true,
+               from_pro_badge_gif: from?.[0]?.pro_badge_gif || null };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -2987,9 +2989,12 @@ app.get('/api/chats', authRequired, async (req, res) => {
       const otherId = chat.user1_id === userId ? chat.user2_id : chat.user1_id;
       // is_verified rides along so the chat list can show the badge next to
       // the name — the same signal every other user-facing list shows.
-      const { data: other } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', otherId);
+      const { data: other } = await supabase.from('users').select('username, avatar_url, is_verified, is_pro, pro_badge_gif').eq('id', otherId);
       return { ...chat, name: other?.[0]?.username || 'User', avatar: other?.[0]?.avatar_url || null,
-               is_verified: other?.[0]?.is_verified === true, other_user_id: otherId };
+               is_verified: other?.[0]?.is_verified === true,
+               is_pro: other?.[0]?.is_pro === true,
+               pro_badge_gif: other?.[0]?.pro_badge_gif || null,
+               other_user_id: otherId };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -3325,7 +3330,9 @@ app.get('/api/groups/:id', authRequired, async (req, res) => {
     const ids = (members || []).map((m) => m.user_id);
     // last_seen rides along so the client can show "N online" the same way
     // it already computes online/last-seen for 1:1 chat (< 70s ago = online).
-    const { data: users } = await supabase.from('users').select('id, username, avatar_url, last_seen').in('id', ids);
+    const { data: users } = await supabase.from('users')
+      .select('id, username, avatar_url, last_seen, is_verified, is_pro, pro_badge_gif')
+      .in('id', ids);
     const userMap = {};
     (users || []).forEach((u) => { userMap[u.id] = u; });
     const memberList = (members || []).map((m) => ({
@@ -3333,6 +3340,9 @@ app.get('/api/groups/:id', authRequired, async (req, res) => {
       username: userMap[m.user_id]?.username || 'User',
       avatar_url: userMap[m.user_id]?.avatar_url || null,
       last_seen: userMap[m.user_id]?.last_seen || null,
+      is_verified: userMap[m.user_id]?.is_verified === true,
+      is_pro: userMap[m.user_id]?.is_pro === true,
+      pro_badge_gif: userMap[m.user_id]?.pro_badge_gif || null,
     }));
     res.json({ success: true, data: { ...group, my_role: role, members: memberList } });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -4590,7 +4600,7 @@ const _nearbyTokens = new Map(); // token -> { userId, exp }
 const _nearbyByUser = new Map(); // userId -> token
 const NEARBY_TTL = 120 * 1000;
 const NEARBY_FIELDS =
-  'id, username, avatar_url, bio, is_verified, followers_count, following_count';
+  'id, username, avatar_url, bio, is_verified, is_pro, pro_badge_gif, followers_count, following_count';
 
 function nearbySession(userId) {
   const t = _nearbyByUser.get(String(userId));
