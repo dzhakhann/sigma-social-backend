@@ -1,0 +1,12 @@
+-- Custom Pro badge: a Pro user can replace the plain "PRO" chip next to their
+-- name with a GIF of their choosing (Telegram's emoji-status idea).
+--
+-- Just the URL. The GIF itself stays on Giphy's CDN — the app already renders
+-- Giphy URLs for chat GIFs and stickers, so there's nothing to host and nothing
+-- to migrate if the user changes it.
+--
+-- NULL means "use the default PRO chip", which is also what a lapsed
+-- subscription falls back to: the badge is only ever RENDERED when is_pro is
+-- true, so entitlement is enforced by the read path rather than by wiping the
+-- column when someone's subscription ends.
+alter table users add column if not exists pro_badge_gif text;

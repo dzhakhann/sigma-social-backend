@@ -4294,6 +4294,53 @@ app.post('/api/crm/verification-requests/:id/reject', adminAuthRequired, async (
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── Custom Pro badge ───────────────────────────────────────────────────────
+// A Pro user may swap the plain "PRO" chip beside their name for a GIF.
+
+/// Only Giphy's own media hosts are accepted.
+///
+/// Without this the field is a stored-URL injection: anyone could point their
+/// badge at an arbitrary server and have every viewer's app fetch it, which
+/// leaks viewers' IPs to a third party and lets the "badge" be swapped for
+/// anything at any time. The app only ever picks from Giphy anyway.
+function isAllowedBadgeUrl(url) {
+  try {
+    const u = new URL(url);
+    if (u.protocol !== 'https:') return false;
+    return /(^|\.)giphy\.com$/.test(u.hostname);
+  } catch (_) {
+    return false;
+  }
+}
+
+app.put('/api/users/me/pro-badge', authRequired, async (req, res) => {
+  try {
+    const { data: rows } = await supabase.from('users')
+      .select('id, is_pro, pro_until').eq('id', req.userId);
+    const me = rows?.[0];
+    if (!me) return res.json({ success: false, error: 'not_found' });
+    if (!proStateFrom(me).active) {
+      return res.status(403).json({ success: false, error: 'pro_only' });
+    }
+
+    const raw = req.body?.url;
+    // Null/empty clears it and falls back to the default PRO chip.
+    const url = raw ? raw.toString().trim() : null;
+    if (url && !isAllowedBadgeUrl(url)) {
+      return res.json({ success: false, error: 'bad_url' });
+    }
+
+    let { error } = await supabase.from('users')
+      .update({ pro_badge_gif: url }).eq('id', req.userId);
+    if (error && /pro_badge_gif/.test(error.message || '')) {
+      // pro_badge.sql not run yet — report it rather than pretending it saved.
+      return res.json({ success: false, error: 'not_migrated' });
+    }
+    if (error) throw error;
+    res.json({ success: true, data: { pro_badge_gif: url } });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 // ─── Pinned messages ────────────────────────────────────────────────────────
 // The pin is a jsonb snapshot on the conversation row, not a message reference
 // — see migrations/pinned_messages.sql for why that's forced on us.
