@@ -4415,6 +4415,22 @@ async function logBilling(userId, productId, token, status, detail) {
   } catch (_) {}
 }
 
+/// Whether this server can actually verify a purchase right now.
+///
+/// The app asks before showing a Buy button. Without this the button would open
+/// Play's payment sheet on a server that can't verify anything: the user gets
+/// CHARGED, verification refuses, and Play only auto-refunds three days later —
+/// a charge with nothing to show for it.
+///
+/// Public on purpose: it leaks nothing (a single boolean) and the client needs
+/// it before anyone is signed in.
+app.get('/api/billing/status', (req, res) => {
+  res.json({
+    success: true,
+    data: { available: !!playAuth(), product_id: PLAY_PRODUCT_ID },
+  });
+});
+
 /// Verifies a subscription purchase and extends the user's Pro period.
 ///
 /// Uses subscriptionsv2, which reports the whole subscription rather than a
