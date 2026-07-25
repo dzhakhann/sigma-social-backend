@@ -2851,8 +2851,9 @@ app.get('/api/notifications', authRequired, async (req, res) => {
     const { data, error } = await supabase.from('notifications').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(50);
     if (error) throw error;
     const enriched = await Promise.all((data || []).map(async (n) => {
-      const { data: from } = await supabase.from('users').select('username, avatar_url').eq('id', n.from_user_id);
-      return { ...n, from_username: from?.[0]?.username, from_avatar: from?.[0]?.avatar_url };
+      const { data: from } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', n.from_user_id);
+      return { ...n, from_username: from?.[0]?.username, from_avatar: from?.[0]?.avatar_url,
+               from_verified: from?.[0]?.is_verified === true };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -2954,7 +2955,9 @@ app.post('/api/reels/:reelId/like', authRequired, async (req, res) => {
 async function updateChatPreview(chatId, lastMessage, senderId) {
   const attempts = [
     { last_message: lastMessage, updated_at: new Date().toISOString(),
-      last_sender_id: senderId, last_read: false },          // everything
+      last_sender_id: senderId, last_read: false, last_delivered: false }, // everything
+    { last_message: lastMessage, updated_at: new Date().toISOString(),
+      last_sender_id: senderId, last_read: false },          // pre message_delivered.sql
     { last_message: lastMessage, last_sender_id: senderId, last_read: false },
     { last_message: lastMessage, updated_at: new Date().toISOString() },
     { last_message: lastMessage },                            // bare minimum
@@ -2982,8 +2985,11 @@ app.get('/api/chats', authRequired, async (req, res) => {
     if (error) throw error;
     const enriched = await Promise.all((chats || []).map(async (chat) => {
       const otherId = chat.user1_id === userId ? chat.user2_id : chat.user1_id;
-      const { data: other } = await supabase.from('users').select('username, avatar_url').eq('id', otherId);
-      return { ...chat, name: other?.[0]?.username || 'User', avatar: other?.[0]?.avatar_url || null, other_user_id: otherId };
+      // is_verified rides along so the chat list can show the badge next to
+      // the name — the same signal every other user-facing list shows.
+      const { data: other } = await supabase.from('users').select('username, avatar_url, is_verified').eq('id', otherId);
+      return { ...chat, name: other?.[0]?.username || 'User', avatar: other?.[0]?.avatar_url || null,
+               is_verified: other?.[0]?.is_verified === true, other_user_id: otherId };
     }));
     res.json({ success: true, data: enriched });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -3130,9 +3136,20 @@ app.post('/api/messages/ack', authRequired, async (req, res) => {
     // messages must survive until THEIR phone confirms. Grace period instead
     // of an immediate delete: reacting to a message needs the row to still
     // exist, and this ack can land within seconds of the message being sent.
-    const { error } = await supabase.from('messages')
-      .update({ acked_at: new Date().toISOString() })
+    // ACK MEANS DELIVERED, NOT READ. ChatsScreen acks incoming messages over
+    // the socket while sitting on the chat LIST, so treating this as "read"
+    // (which it used to) lit up ✓✓-read for messages nobody had opened.
+    // Reading is now its own endpoint: POST /api/messages/read.
+    const now = new Date().toISOString();
+    let { error } = await supabase.from('messages')
+      .update({ acked_at: now, delivered_at: now })
       .eq('chat_id', chat_id).in('id', list).neq('sender_id', req.userId);
+    if (error && /delivered_at/.test(error.message || '')) {
+      // message_delivered.sql not run yet — keep the ack working without it.
+      ({ error } = await supabase.from('messages')
+        .update({ acked_at: now })
+        .eq('chat_id', chat_id).in('id', list).neq('sender_id', req.userId));
+    }
     if (error && /acked_at/.test(error.message || '')) {
       // Migration not run yet — fall back to the old immediate-delete behavior.
       await supabase.from('messages').delete()
@@ -3141,11 +3158,10 @@ app.post('/api/messages/ack', authRequired, async (req, res) => {
       throw error;
     }
     const other = chat[0].user1_id === req.userId ? chat[0].user2_id : chat[0].user1_id;
-    // I just picked up the other side's messages → their chat-list row flips
-    // to ✓✓ (best-effort; ignored if the migration hasn't been run).
-    try { await supabase.from('chats').update({ last_read: true }).eq('id', chat_id); } catch (_) {}
-    // Delivered-and-read receipt for the sender's ✓✓ (their copy is local).
-    emitToUser(other, 'messages_read', { chatId: chat_id, reader: req.userId, ids: list });
+    // Chat-list counterpart of the in-chat ✓✓ (best-effort — ignored when the
+    // migration hasn't been run).
+    try { await supabase.from('chats').update({ last_delivered: true }).eq('id', chat_id); } catch (_) {}
+    emitToUser(other, 'messages_delivered', { chatId: chat_id, ids: list });
     res.json({ success: true });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -3203,8 +3219,15 @@ app.post('/api/messages/sync', authRequired, async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, 500) : [];
   if (!ids.length) return res.json({ success: true, data: {} });
   try {
-    const { data: rows, error } = await supabase.from('messages')
-      .select('id, chat_id, is_read, reactions').in('id', ids);
+    // delivered_at is selected separately so a database without
+    // message_delivered.sql still returns reactions/read-state instead of
+    // failing the whole sync.
+    let { data: rows, error } = await supabase.from('messages')
+      .select('id, chat_id, is_read, reactions, delivered_at').in('id', ids);
+    if (error && /delivered_at/.test(error.message || '')) {
+      ({ data: rows, error } = await supabase.from('messages')
+        .select('id, chat_id, is_read, reactions').in('id', ids));
+    }
     if (error) throw error;
     const chatIds = [...new Set((rows || []).map((r) => r.chat_id))];
     const { data: chats } = await supabase.from('chats').select('id, user1_id, user2_id').in('id', chatIds);
@@ -3214,7 +3237,11 @@ app.post('/api/messages/sync', authRequired, async (req, res) => {
     const out = {};
     for (const row of rows || []) {
       if (!myChats.has(row.chat_id)) continue;
-      out[row.id] = { is_read: row.is_read, reactions: row.reactions || {} };
+      out[row.id] = {
+        is_read: row.is_read,
+        delivered: !!row.delivered_at || row.is_read === true,
+        reactions: row.reactions || {},
+      };
     }
     res.json({ success: true, data: out });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -4264,6 +4291,224 @@ app.post('/api/crm/verification-requests/:id/reject', adminAuthRequired, async (
     await sendSystemMessage(reqRow[0].user_id, text).catch(() => {});
     await logAdminAction(req, 'reject_verification', 'user', reqRow[0].user_id, {});
     res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── Pinned messages ────────────────────────────────────────────────────────
+// The pin is a jsonb snapshot on the conversation row, not a message reference
+// — see migrations/pinned_messages.sql for why that's forced on us.
+
+/// Trims a client-supplied message down to the fields the pinned bar renders.
+/// Never trust the whole object: it would let a client store arbitrary jsonb.
+function pinSnapshot(msg, pinnedBy) {
+  if (!msg || typeof msg !== 'object') return null;
+  return {
+    id: (msg.id ?? '').toString().slice(0, 64),
+    sender_id: (msg.sender_id ?? '').toString().slice(0, 64),
+    sender_name: (msg.sender_name ?? '').toString().slice(0, 80),
+    content: (msg.content ?? '').toString().slice(0, 400),
+    message_type: (msg.message_type ?? 'text').toString().slice(0, 20),
+    created_at: (msg.created_at ?? '').toString().slice(0, 40),
+    pinned_by: pinnedBy,
+    pinned_at: new Date().toISOString(),
+  };
+}
+
+app.put('/api/chats/:chatId/pin', authRequired, async (req, res) => {
+  try {
+    const { data: chat } = await supabase.from('chats')
+      .select('user1_id, user2_id').eq('id', req.params.chatId);
+    if (!chat?.[0]) return res.json({ success: false, error: 'Chat not found' });
+    if (chat[0].user1_id !== req.userId && chat[0].user2_id !== req.userId) {
+      return res.status(403).json({ success: false, error: 'Forbidden' });
+    }
+    // A null/absent message unpins — one endpoint for both directions.
+    const snap = req.body?.message ? pinSnapshot(req.body.message, req.userId) : null;
+    const { error } = await supabase.from('chats')
+      .update({ pinned_message: snap }).eq('id', req.params.chatId);
+    if (error) throw error;
+    for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
+      emitToUser(uid, 'chat_pin', { chat_id: req.params.chatId, pinned_message: snap });
+    }
+    res.json({ success: true, data: snap });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.put('/api/groups/:groupId/pin', authRequired, async (req, res) => {
+  try {
+    const role = await requireMember(req.params.groupId, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Forbidden' });
+    // Pinning speaks for the whole group, so it's an admin action — unlike a
+    // 1:1 chat where either participant may pin.
+    if (role !== 'admin') {
+      return res.status(403).json({ success: false, error: 'admin_only' });
+    }
+    const snap = req.body?.message ? pinSnapshot(req.body.message, req.userId) : null;
+    const { error } = await supabase.from('groups')
+      .update({ pinned_message: snap }).eq('id', req.params.groupId);
+    if (error) throw error;
+    for (const uid of await groupMemberIds(req.params.groupId)) {
+      emitToUser(uid, 'group_pin', { group_id: req.params.groupId, pinned_message: snap });
+    }
+    res.json({ success: true, data: snap });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// ─── Promo codes ────────────────────────────────────────────────────────────
+// Admin-issued codes granting a Pro subscription. See migrations/promo_codes.sql
+// for why definitions and redemptions are two separate tables.
+
+/// Current Pro state for a user, accounting for expiry. `is_pro` alone can't
+/// answer this — it has no end date — so a lapsed subscription would read as
+/// active forever.
+function proStateFrom(row) {
+  const until = row?.pro_until ? new Date(row.pro_until) : null;
+  const active = !!row?.is_pro && (!until || until.getTime() > Date.now());
+  return { active, until };
+}
+
+app.get('/api/crm/promo-codes', adminAuthRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('promo_codes')
+      .select('*').order('created_at', { ascending: false }).limit(500);
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.post('/api/crm/promo-codes', adminAuthRequired, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const code = (b.code || '').toString().trim().toUpperCase();
+    if (!/^[A-Z0-9_-]{3,32}$/.test(code)) {
+      return res.json({ success: false, error: 'Code must be 3-32 chars: A-Z, 0-9, _ or -' });
+    }
+    const durationDays = Math.max(1, parseInt(b.duration_days, 10) || 30);
+    // Blank/0 max_uses means unlimited — stored as null, not 0, so the
+    // "used_count >= max_uses" check can't accidentally exhaust it instantly.
+    const rawMax = parseInt(b.max_uses, 10);
+    const maxUses = Number.isFinite(rawMax) && rawMax > 0 ? rawMax : null;
+    const row = {
+      code,
+      description: (b.description || '').toString().slice(0, 300),
+      plan: (b.plan || 'pro').toString().slice(0, 30),
+      duration_days: durationDays,
+      max_uses: maxUses,
+      expires_at: b.expires_at ? new Date(b.expires_at).toISOString() : null,
+      active: b.active === false ? false : true,
+      created_by: req.adminUsername || '',
+    };
+    const { data, error } = await supabase.from('promo_codes').insert([row]).select().single();
+    if (error) {
+      if (/duplicate|unique/i.test(error.message || '')) {
+        return res.json({ success: false, error: 'That code already exists' });
+      }
+      throw error;
+    }
+    await logAdminAction(req, 'create_promo', 'promo', data.id, { code, duration_days: durationDays });
+    res.json({ success: true, data });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.put('/api/crm/promo-codes/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const b = req.body || {};
+    const patch = {};
+    if (b.active !== undefined) patch.active = !!b.active;
+    if (b.description !== undefined) patch.description = (b.description || '').toString().slice(0, 300);
+    if (b.duration_days !== undefined) patch.duration_days = Math.max(1, parseInt(b.duration_days, 10) || 30);
+    if (b.max_uses !== undefined) {
+      const n = parseInt(b.max_uses, 10);
+      patch.max_uses = Number.isFinite(n) && n > 0 ? n : null;
+    }
+    if (b.expires_at !== undefined) {
+      patch.expires_at = b.expires_at ? new Date(b.expires_at).toISOString() : null;
+    }
+    if (!Object.keys(patch).length) return res.json({ success: false, error: 'Nothing to update' });
+    const { error } = await supabase.from('promo_codes').update(patch).eq('id', req.params.id);
+    if (error) throw error;
+    await logAdminAction(req, 'update_promo', 'promo', req.params.id, patch);
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.delete('/api/crm/promo-codes/:id', adminAuthRequired, async (req, res) => {
+  try {
+    const { error } = await supabase.from('promo_codes').delete().eq('id', req.params.id);
+    if (error) throw error;
+    // Redemptions are deliberately NOT deleted — they're the audit trail of
+    // who already received a subscription from this code.
+    await logAdminAction(req, 'delete_promo', 'promo', req.params.id, {});
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+app.get('/api/crm/promo-codes/:id/redemptions', adminAuthRequired, async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('promo_redemptions')
+      .select('*').eq('promo_id', req.params.id)
+      .order('created_at', { ascending: false }).limit(500);
+    if (error) throw error;
+    res.json({ success: true, data: data || [] });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+// User-facing redemption. Validates, then extends the subscription.
+app.post('/api/promo/redeem', authRequired, async (req, res) => {
+  const code = (req.body?.code || '').toString().trim().toUpperCase();
+  if (!code) return res.json({ success: false, error: 'empty_code' });
+  try {
+    const { data: rows, error } = await supabase.from('promo_codes').select('*').eq('code', code);
+    if (error) throw error;
+    const promo = rows?.[0];
+    // Every rejection returns a stable machine-readable reason so the app can
+    // show a localized message instead of echoing raw English back at the user.
+    if (!promo) return res.json({ success: false, error: 'not_found' });
+    if (!promo.active) return res.json({ success: false, error: 'inactive' });
+    if (promo.expires_at && new Date(promo.expires_at).getTime() < Date.now()) {
+      return res.json({ success: false, error: 'expired' });
+    }
+    if (promo.max_uses != null && (promo.used_count || 0) >= promo.max_uses) {
+      return res.json({ success: false, error: 'exhausted' });
+    }
+
+    const { data: userRows } = await supabase.from('users')
+      .select('id, username, is_pro, pro_until').eq('id', req.userId);
+    const user = userRows?.[0];
+    if (!user) return res.json({ success: false, error: 'not_found' });
+
+    // Insert the redemption FIRST: the unique (promo_id, user_id) index is
+    // what actually prevents one person redeeming the same code twice, and
+    // relying on it means two concurrent requests can't both pass a check.
+    const { error: redeemErr } = await supabase.from('promo_redemptions').insert([{
+      promo_id: promo.id, code: promo.code, user_id: user.id,
+      username: user.username || '', granted_days: promo.duration_days,
+    }]);
+    if (redeemErr) {
+      if (/duplicate|unique/i.test(redeemErr.message || '')) {
+        return res.json({ success: false, error: 'already_used' });
+      }
+      throw redeemErr;
+    }
+
+    // Extend from whichever is later: now, or an unexpired current
+    // subscription — stacking codes must not shorten what's already paid for.
+    const { until: currentUntil } = proStateFrom(user);
+    const base = currentUntil && currentUntil.getTime() > Date.now() ? currentUntil : new Date();
+    const proUntil = new Date(base.getTime() + promo.duration_days * 86400000);
+
+    let { error: userErr } = await supabase.from('users')
+      .update({ is_pro: true, pro_until: proUntil.toISOString() }).eq('id', user.id);
+    if (userErr && /pro_until/.test(userErr.message || '')) {
+      // promo_codes.sql not run yet — still grant Pro, just without an expiry.
+      ({ error: userErr } = await supabase.from('users').update({ is_pro: true }).eq('id', user.id));
+    }
+    if (userErr) throw userErr;
+
+    await supabase.from('promo_codes')
+      .update({ used_count: (promo.used_count || 0) + 1 }).eq('id', promo.id);
+
+    res.json({ success: true, data: { plan: promo.plan, days: promo.duration_days, pro_until: proUntil.toISOString() } });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 

@@ -131,6 +131,7 @@
     <div class="navBtn" data-tab="reels" onclick="setTab('reels')">🎬 Reels</div>
     <div class="navBtn" data-tab="reports" onclick="setTab('reports')">🚩 Reports<span class="cnt hidden" id="reportsCnt"></span></div>
     <div class="navBtn" data-tab="verifications" onclick="setTab('verifications')">✔ Verification<span class="cnt hidden" id="verifCnt"></span></div>
+    <div class="navBtn" data-tab="promos" onclick="setTab('promos')">🎟 Promo codes</div>
     <div class="navBtn" data-tab="admins" onclick="setTab('admins')">🛡 Admins</div>
     <div class="navBtn" data-tab="audit" onclick="setTab('audit')">📜 Audit Log</div>
     <div style="flex:1"></div>
@@ -158,7 +159,7 @@ let token=localStorage.getItem('crm_token')||'';
 let me=JSON.parse(localStorage.getItem('crm_me')||'null');
 const H=()=>token?{'Authorization':'Bearer '+token}:{};
 let tab='dashboard';
-const D={users:[],posts:[],comments:[],stories:[],reels:[],reports:[],verifications:[],admins:[],audit:[],stats:{}};
+const D={users:[],posts:[],comments:[],stories:[],reels:[],reports:[],verifications:[],admins:[],audit:[],promos:[],stats:{}};
 
 const VER='<svg class="ver" viewBox="0 0 24 24"><path fill="#4F7CFF" d="M12 1l2.4 1.9 3-.3 1.1 2.8 2.8 1.4-.8 2.9.9 2.9-2.8 1.5-1.1 2.8-3-.4L12 23l-2.5-1.9-3 .4-1.1-2.8L2.6 16l.9-2.9-.8-2.9 2.8-1.4L6.6 2.6l3 .3z"/><path fill="#fff" d="M10.5 14.7l-2.3-2.3-1.2 1.2 3.5 3.5 6.2-6.2-1.2-1.2z"/></svg>';
 function esc(s){return (s||'').toString().replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -220,7 +221,7 @@ const jdel=(p,b)=>api(p,{method:'DELETE',headers:{'Content-Type':'application/js
 // ─── Nav ───────────────────────────────────────────────────────────────────
 const TABS=[['dashboard','📊 Dashboard'],['users','👤 Users'],['posts','🖼 Posts'],['comments','💬 Comments'],
   ['stories','⭐ Stories'],['reels','🎬 Reels'],['reports','🚩 Reports'],['verifications','✔ Verification'],
-  ['admins','🛡 Admins'],['audit','📜 Audit Log']];
+  ['promos','🎟 Promo codes'],['admins','🛡 Admins'],['audit','📜 Audit Log']];
 function buildNav(){
   document.querySelectorAll('.navBtn[data-tab]').forEach(b=>b.classList.toggle('on', b.dataset.tab===tab));
 }
@@ -228,12 +229,12 @@ function setTab(t){tab=t;buildNav();document.getElementById('pageTitle').textCon
 
 async function loadAll(){
   try{
-    const [s,u,p,c,st,rl,rp,vf,ad,al]=await Promise.all([
+    const [s,u,p,c,st,rl,rp,vf,ad,al,pr]=await Promise.all([
       api('/crm/stats'),api('/crm/users'),api('/crm/posts'),api('/crm/comments'),api('/crm/stories'),
       api('/crm/reels'),api('/crm/reports?status=open'),api('/crm/verification-requests?status=pending'),
-      api('/crm/admins'),api('/crm/audit-log')]);
+      api('/crm/admins'),api('/crm/audit-log'),api('/crm/promo-codes')]);
     D.stats=s.data||{}; D.users=u.data||[]; D.posts=p.data||[]; D.comments=c.data||[]; D.stories=st.data||[];
-    D.reels=rl.data||[]; D.reports=rp.data||[]; D.verifications=vf.data||[]; D.admins=ad.data||[]; D.audit=al.data||[];
+    D.reels=rl.data||[]; D.reports=rp.data||[]; D.verifications=vf.data||[]; D.admins=ad.data||[]; D.audit=al.data||[]; D.promos=pr.data||[];
     updateBadges();
     render();
   }catch(e){}
@@ -256,6 +257,7 @@ function render(){
   else if(tab==='reels') el.innerHTML=renderContent(D.reels,'reels');
   else if(tab==='reports') el.innerHTML=renderReports();
   else if(tab==='verifications') el.innerHTML=renderVerifications();
+  else if(tab==='promos') el.innerHTML=renderPromos();
   else if(tab==='admins') el.innerHTML=renderAdmins();
   else if(tab==='audit') el.innerHTML=renderAudit();
 }
@@ -426,6 +428,81 @@ function renderVerifications(){
 async function verifAction(id,action){await jpost('/crm/verification-requests/'+id+'/'+action);loadAll();}
 
 // ─── Admins ─────────────────────────────────────────────────────────────────
+// ─── Promo codes ───────────────────────────────────────────────────────────
+// A code is "one-time" simply by having max_uses = 1 — there is no separate
+// boolean, so the flag and the counter can never disagree.
+function promoStatus(x){
+  if(!x.active) return ['Disabled','var(--soft)'];
+  if(x.expires_at && new Date(x.expires_at) < new Date()) return ['Expired','var(--danger)'];
+  if(x.max_uses!=null && (x.used_count||0) >= x.max_uses) return ['Used up','var(--danger)'];
+  return ['Active','#2ecc71'];
+}
+function renderPromos(){
+  const list=D.promos.filter(x=>match(x.code+' '+(x.description||'')));
+  const rows=list.map(x=>{
+    const [label,color]=promoStatus(x);
+    const uses=(x.used_count||0)+' / '+(x.max_uses!=null?x.max_uses:'∞');
+    return `<div class="item">
+      <div class="grow">
+        <div class="name">${esc(x.code)}
+          <span class="sub" style="color:${color};font-weight:700">${label}</span></div>
+        <div class="sub">${esc(x.plan||'pro')} · ${x.duration_days} days · used ${uses}${
+          x.expires_at?' · until '+fmtDate(x.expires_at):''}</div>
+        ${x.description?`<div class="sub">${esc(x.description)}</div>`:''}
+      </div>
+      <button class="btn ghost sm" onclick="showRedemptions('${x.id}','${esc(x.code)}')">Who used</button>
+      <button class="btn ghost sm" onclick="togglePromo('${x.id}',${!x.active})">${x.active?'Disable':'Enable'}</button>
+      <button class="btn danger sm" onclick="deletePromo('${x.id}')">Delete</button>
+    </div>`;
+  }).join('');
+  return `<div class="card"><b>Create promo code</b>
+    <div class="grid2" style="margin-top:10px">
+      <input id="pcCode" placeholder="Code, e.g. SIGMA2026" maxlength="32">
+      <input id="pcPlan" value="pro" placeholder="Plan">
+      <input id="pcDays" type="number" min="1" value="30" placeholder="Subscription days">
+      <input id="pcMax" type="number" min="1" placeholder="Max uses (blank = unlimited)">
+      <input id="pcExp" type="date" placeholder="Valid until">
+      <input id="pcDesc" maxlength="300" placeholder="Description">
+    </div>
+    <div class="sub" style="margin-top:6px">Blank max uses = unlimited · 1 = one-time · blank date = never expires</div>
+    <div class="err" id="pcErr" style="margin-top:6px"></div>
+    <button class="btn" style="margin-top:8px" onclick="createPromo()">Create</button>
+  </div>
+  <div id="redeemPane"></div>` + (rows||'<div class="empty">No promo codes yet</div>');
+}
+async function reloadPromos(){
+  const r=await api('/crm/promo-codes'); D.promos=r.data||[]; render();
+}
+async function createPromo(){
+  const err=document.getElementById('pcErr'); err.textContent='';
+  const j=await jpost('/crm/promo-codes',{
+    code:document.getElementById('pcCode').value,
+    plan:document.getElementById('pcPlan').value,
+    duration_days:document.getElementById('pcDays').value,
+    max_uses:document.getElementById('pcMax').value,
+    expires_at:document.getElementById('pcExp').value||null,
+    description:document.getElementById('pcDesc').value,
+  });
+  if(j.success!==true){err.textContent=j.error||'Failed';return;}
+  reloadPromos();
+}
+async function togglePromo(id,active){ await jput('/crm/promo-codes/'+id,{active}); reloadPromos(); }
+async function deletePromo(id){
+  if(!confirm('Delete this code? Redemptions already made are kept.'))return;
+  await jdel('/crm/promo-codes/'+id); reloadPromos();
+}
+async function showRedemptions(id,code){
+  const j=await api('/crm/promo-codes/'+id+'/redemptions');
+  const rows=j.data||[];
+  const pane=document.getElementById('redeemPane');
+  pane.innerHTML=`<div class="card"><b>${esc(code)} — redeemed by (${rows.length})</b>`+
+    (rows.length?rows.map(r=>`<div class="item"><div class="grow">
+        <div class="name">${esc(r.username||r.user_id)}</div>
+        <div class="sub">${r.granted_days} days · ${fmtDate(r.created_at)}</div>
+      </div></div>`).join(''):'<div class="sub" style="margin-top:8px">Nobody has used this code yet.</div>')+
+    `</div>`;
+}
+
 function renderAdmins(){
   const list=D.admins.map(a=>`<div class="item">
     <div class="grow"><div class="name">@${esc(a.username)}${a.id===me.id?' <span class="sub">(you)</span>':''}</div>
