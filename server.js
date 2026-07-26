@@ -1725,6 +1725,54 @@ app.get('/api/podcast/episodes', async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+/// Get-or-create a stable shareable id for one episode. Keyed to (feedUrl,
+/// audio) so sharing the same episode twice returns the same link instead of
+/// minting duplicates.
+app.post('/api/podcast/share', async (req, res) => {
+  try {
+    const { feedUrl, audio, title, artist, artwork, duration } = req.body || {};
+    if (!feedUrl || !audio) return res.json({ success: false, error: 'Missing feedUrl/audio' });
+
+    const { data: existing, error: selErr } = await supabase.from('podcast_episode_links')
+      .select('id').eq('feed_url', feedUrl).eq('audio_url', audio).maybeSingle();
+    if (selErr && /podcast_episode_links/.test(selErr.message || '')) {
+      // Migration not run yet — nothing to share, but don't break the app.
+      return res.json({ success: false, error: 'not migrated' });
+    }
+    if (existing?.id) return res.json({ success: true, id: existing.id });
+
+    const id = crypto.randomBytes(6).toString('base64url');
+    const { error } = await supabase.from('podcast_episode_links').insert([{
+      id, feed_url: feedUrl, audio_url: audio,
+      title: title || '', artist: artist || '', artwork: artwork || '', duration: duration || '',
+    }]);
+    if (error) throw error;
+    res.json({ success: true, id });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+/// Resolves a shared podcast link back to a playable episode. Serves the
+/// copy taken at share time — never re-fetches the feed — so a link keeps
+/// working even if the show later changes its RSS or removes the episode.
+app.get('/api/podcast/share/:id', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('podcast_episode_links')
+      .select('*').eq('id', req.params.id).maybeSingle();
+    if (error && /podcast_episode_links/.test(error.message || '')) {
+      return res.json({ success: true, episode: null });
+    }
+    if (error) throw error;
+    if (!data) return res.json({ success: true, episode: null });
+    res.json({
+      success: true,
+      episode: {
+        title: data.title, showTitle: data.artist, artwork: data.artwork,
+        audio: data.audio_url, duration: data.duration, kind: 'podcast',
+      },
+    });
+  } catch (e) { res.json({ success: false, error: e.message, episode: null }); }
+});
+
 // ─── REPORTS · BLOCK · HIDE · VERIFICATION ───────────────────────────────────
 // Requires the moderation tables (see migrations/moderation.sql).
 
@@ -2775,6 +2823,44 @@ async function recordStoryEvent(storyId, userId, type) {
         { onConflict: 'story_id,user_id,type', ignoreDuplicates: true });
   } catch (_) {}
 }
+
+/// A single story by id — what a shared /story/<id> link resolves to.
+///
+/// Returns the AUTHOR's whole current story set plus the index of the requested
+/// one, because the viewer is a pager: opening a lone story with no siblings
+/// would break swiping to the next one, and a link is usually shared mid-set.
+///
+/// Expired stories are reported as gone rather than 404-ing silently, so the app
+/// can say "this story is no longer available" instead of doing nothing.
+app.get('/api/stories/:id', authRequired, async (req, res) => {
+  try {
+    const { data: rows, error } = await supabase.from('stories')
+      .select('*').eq('id', req.params.id);
+    if (error) throw error;
+    const story = rows?.[0];
+    if (!story) return res.json({ success: false, error: 'expired' });
+
+    const { data: siblings } = await supabase.from('stories')
+      .select('*').eq('user_id', story.user_id)
+      .order('created_at', { ascending: true });
+    const { data: author } = await supabase.from('users')
+      .select('username, avatar_url, is_verified, is_pro, pro_badge_gif')
+      .eq('id', story.user_id);
+
+    // Story rows carry no author identity of their own, so stamp it — the viewer
+    // header otherwise falls back to "User".
+    const list = (siblings || []).map((s) => ({
+      ...s,
+      username: author?.[0]?.username || 'User',
+      user_avatar: author?.[0]?.avatar_url || null,
+    }));
+    const index = list.findIndex((s) => s.id === story.id);
+    res.json({
+      success: true,
+      data: { stories: list, index: index < 0 ? 0 : index },
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
 
 app.post('/api/stories/:id/view', authRequired, async (req, res) => {
   await recordStoryEvent(req.params.id, req.userId, 'view');
