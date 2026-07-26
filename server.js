@@ -3538,6 +3538,99 @@ app.post('/api/groups/:id/messages', authRequired, async (req, res) => {
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
 
+// ─── Group read receipts ────────────────────────────────────────────────────
+// Distinct from ack/delivery: ack means "this phone downloaded it", a read means
+// "this person opened the chat and saw it". The old seen-by list derived itself
+// from the delivery queue and therefore listed everyone the message reached.
+
+/// Marks messages as read by the caller. Idempotent — the unique index absorbs
+/// repeats, so the client can call it every time the chat opens.
+app.post('/api/groups/:id/messages/read', authRequired, async (req, res) => {
+  try {
+    const role = await requireMember(req.params.id, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Forbidden' });
+    const ids = (Array.isArray(req.body?.ids) ? req.body.ids : []).slice(0, 500);
+    if (!ids.length) return res.json({ success: true });
+
+    // You don't "read" your own message, and inserting a receipt for it would
+    // make the sender appear in their own seen-by list.
+    const { data: mine } = await supabase.from('group_messages')
+      .select('id').eq('sender_id', req.userId).in('id', ids);
+    const ownIds = new Set((mine || []).map((m) => m.id));
+    const rows = ids
+      .filter((id) => !ownIds.has(id))
+      .map((id) => ({ group_id: req.params.id, message_id: id, user_id: req.userId }));
+    if (!rows.length) return res.json({ success: true });
+
+    // Ignore duplicates instead of failing the batch: re-opening a chat is the
+    // normal case, not an error.
+    const { error } = await supabase.from('group_message_reads')
+      .upsert(rows, { onConflict: 'message_id,user_id', ignoreDuplicates: true });
+    if (error && /group_message_reads/.test(error.message || '')) {
+      // Migration not run yet — silently no-op rather than breaking chat open.
+      return res.json({ success: true, migrated: false });
+    }
+    if (error) throw error;
+
+    // Tell the group so an open sender's tick and seen-by list update live.
+    for (const uid of await groupMemberIds(req.params.id)) {
+      emitToUser(uid, 'group_message_read', {
+        group_id: req.params.id, message_ids: rows.map((r) => r.message_id),
+        user_id: req.userId,
+      });
+    }
+    res.json({ success: true });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
+/// Who actually read a message, and who hasn't — the seen-by sheet.
+app.get('/api/groups/:id/messages/:messageId/reads', authRequired, async (req, res) => {
+  try {
+    const role = await requireMember(req.params.id, req.userId);
+    if (!role) return res.status(403).json({ success: false, error: 'Forbidden' });
+
+    let readRows = [];
+    const { data, error } = await supabase.from('group_message_reads')
+      .select('user_id, read_at').eq('message_id', req.params.messageId);
+    if (error && !/group_message_reads/.test(error.message || '')) throw error;
+    readRows = data || [];
+
+    const readAt = {};
+    readRows.forEach((r) => { readAt[r.user_id] = r.read_at; });
+
+    // The full member list comes back too, split — the client shouldn't have to
+    // guess who "hasn't read" by subtracting one list from another it may have
+    // fetched at a different time.
+    const { data: members } = await supabase.from('group_members')
+      .select('user_id').eq('group_id', req.params.id);
+    const ids = (members || []).map((m) => m.user_id);
+    const names = await usernameMap(ids);
+    const { data: users } = await supabase.from('users')
+      .select('id, username, avatar_url').in('id', ids.length ? ids : ['00000000-0000-0000-0000-000000000000']);
+    const byId = {};
+    (users || []).forEach((u) => { byId[u.id] = u; });
+
+    const { data: msg } = await supabase.from('group_messages')
+      .select('sender_id').eq('id', req.params.messageId);
+    const senderId = msg?.[0]?.sender_id || null;
+
+    const shape = (uid) => ({
+      user_id: uid,
+      username: byId[uid]?.username || names[uid] || 'User',
+      avatar_url: byId[uid]?.avatar_url || null,
+      read_at: readAt[uid] || null,
+    });
+    const candidates = ids.filter((uid) => uid !== senderId);
+    res.json({
+      success: true,
+      data: {
+        read: candidates.filter((uid) => readAt[uid]).map(shape),
+        unread: candidates.filter((uid) => !readAt[uid]).map(shape),
+      },
+    });
+  } catch (e) { res.json({ success: false, error: e.message }); }
+});
+
 app.post('/api/groups/:id/messages/ack', authRequired, async (req, res) => {
   const ids = Array.isArray(req.body.ids) ? req.body.ids.slice(0, 500) : [];
   if (!ids.length) return res.json({ success: true });
