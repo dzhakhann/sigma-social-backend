@@ -256,6 +256,96 @@ async function notifyMessage(recipientId, senderId, text, extra) {
   } catch (_) {}
 }
 
+/// Short label for a message in a notification body.
+///
+/// Shared so a reaction/reply push describes the message the same way the chat
+/// list does, instead of showing an empty line for a voice note or a photo.
+function previewOf(msg) {
+  const previews = {
+    image: '📷 Photo', video: '🎥 Video', voice: '🎤 Voice',
+    gif: 'GIF', sticker: '💟 Sticker',
+  };
+  return previews[msg?.message_type] || (msg?.content || '');
+}
+
+/// "X reacted 🔥 to your message".
+///
+/// Separate from createNotification for the same reason notifyMessage is: this
+/// belongs in the chat, not in the activity feed. One row per reaction would
+/// bury likes and comments under emoji traffic.
+async function notifyReaction(authorId, actorId, emoji, extra) {
+  if (!authorId || String(authorId) === String(actorId)) return;
+  try {
+    const { data: from } = await supabase.from('users')
+      .select('username, avatar_url').eq('id', actorId);
+    const payload = {
+      type: 'reaction',
+      message: `${emoji}  ${previewOf({ content: extra.preview })}`.trim(),
+      from_user_id: actorId,
+      from_username: from?.[0]?.username || 'Sigmacta',
+      from_avatar: from?.[0]?.avatar_url || null,
+      emoji,
+      ...extra,
+    };
+    emitToUser(authorId, 'notification', payload);
+    const { data: rec } = await supabase.from('users')
+      .select('fcm_token').eq('id', authorId);
+    if (rec?.[0]?.fcm_token) sendFcm(authorId, rec[0].fcm_token, payload);
+  } catch (_) {}
+}
+
+/// "X replied to you".
+async function notifyReply(authorId, actorId, text, extra) {
+  if (!authorId || String(authorId) === String(actorId)) return;
+  try {
+    const { data: from } = await supabase.from('users')
+      .select('username, avatar_url').eq('id', actorId);
+    const payload = {
+      type: 'reply',
+      message: text || '',
+      from_user_id: actorId,
+      from_username: from?.[0]?.username || 'Sigmacta',
+      from_avatar: from?.[0]?.avatar_url || null,
+      ...extra,
+    };
+    emitToUser(authorId, 'notification', payload);
+    const { data: rec } = await supabase.from('users')
+      .select('fcm_token').eq('id', authorId);
+    if (rec?.[0]?.fcm_token) sendFcm(authorId, rec[0].fcm_token, payload);
+  } catch (_) {}
+}
+
+/// @mentions inside a message body.
+///
+/// Resolved against real usernames rather than trusting the text: "@everyone" or
+/// a typo would otherwise become a notification to nobody, and a crafted body
+/// could be used to spam arbitrary ids.
+async function notifyMentions(text, actorId, extra) {
+  try {
+    const names = [...new Set(
+      (text || '').match(/@([A-Za-z0-9_.]{2,30})/g)?.map((m) => m.slice(1)) || [],
+    )];
+    if (!names.length) return;
+    const { data: users } = await supabase.from('users')
+      .select('id, fcm_token').in('username', names);
+    const { data: from } = await supabase.from('users')
+      .select('username, avatar_url').eq('id', actorId);
+    for (const u of users || []) {
+      if (String(u.id) === String(actorId)) continue;
+      const payload = {
+        type: 'mention',
+        message: text,
+        from_user_id: actorId,
+        from_username: from?.[0]?.username || 'Sigmacta',
+        from_avatar: from?.[0]?.avatar_url || null,
+        ...extra,
+      };
+      emitToUser(u.id, 'notification', payload);
+      if (u.fcm_token) sendFcm(u.id, u.fcm_token, payload);
+    }
+  } catch (_) {}
+}
+
 // ─── AURA: user activity score (gamification). Small increments per action. ────
 // Bulk-notify every follower of `userId` (fire-and-forget from the caller —
 // publishing a post/story shouldn't wait on however many thousands of
@@ -3168,6 +3258,10 @@ app.post('/api/messages', authRequired, async (req, res) => {
     // photo/voice message reads as "🎤 Voice" instead of arriving blank.
     const other = chat[0].user1_id === sender_id ? chat[0].user2_id : chat[0].user1_id;
     notifyMessage(other, sender_id, last, { chat_id, message_id: data.id });
+    // A mention still fires even though the recipient already got a message
+    // push: being named is a different signal from a chat being active, and in a
+    // muted chat it's the only one that should get through.
+    notifyMentions(content, sender_id, { chat_id, message_id: data.id });
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -3240,7 +3334,8 @@ app.post('/api/messages/:messageId/react', authRequired, async (req, res) => {
   const emoji = (req.body.emoji || '').toString();
   if (!emoji) return res.json({ success: false, error: 'emoji is required' });
   try {
-    const { data: rows } = await supabase.from('messages').select('chat_id, reactions')
+    const { data: rows } = await supabase.from('messages')
+      .select('chat_id, reactions, sender_id, content, message_type')
       .eq('id', req.params.messageId);
     if (!rows || rows.length === 0) return res.json({ success: false, error: 'Not found' });
     const { data: chat } = await supabase.from('chats').select('user1_id, user2_id').eq('id', rows[0].chat_id);
@@ -3260,6 +3355,14 @@ app.post('/api/messages/:messageId/react', authRequired, async (req, res) => {
     for (const uid of [chat[0].user1_id, chat[0].user2_id]) {
       emitToUser(uid, 'message_reaction',
         { chat_id: rows[0].chat_id, message_id: req.params.messageId, reactions });
+    }
+    // Only when ADDING one: removing a reaction shouldn't ping anybody, and
+    // toggling would otherwise notify twice for one change of mind.
+    if (!already) {
+      notifyReaction(rows[0].sender_id, req.userId, emoji, {
+        chat_id: rows[0].chat_id, message_id: req.params.messageId,
+        preview: previewOf(rows[0]),
+      });
     }
     res.json({ success: true, data: reactions });
   } catch (e) { res.json({ success: false, error: e.message }); }
@@ -3534,6 +3637,15 @@ app.post('/api/groups/:id/messages', authRequired, async (req, res) => {
       notifyMessage(uid, req.userId, previews[message_type] || content || '',
         { group_id: req.params.id, group_name: groupName, message_id: data.id });
     }
+    notifyMentions(content, req.userId,
+      { group_id: req.params.id, group_name: groupName, message_id: data.id });
+    // Replying to someone in a busy group is easy to miss among the other
+    // messages, so the person replied TO gets their own notification.
+    if (reply_to?.sender_id && String(reply_to.sender_id) !== String(req.userId)) {
+      notifyReply(reply_to.sender_id, req.userId,
+        previews[message_type] || content || '',
+        { group_id: req.params.id, group_name: groupName, message_id: data.id });
+    }
     res.json({ success: true, data });
   } catch (e) { res.json({ success: false, error: e.message }); }
 });
@@ -3684,7 +3796,8 @@ app.post('/api/groups/:groupId/messages/:messageId/react', authRequired, async (
   try {
     const role = await requireMember(req.params.groupId, req.userId);
     if (!role) return res.status(403).json({ success: false, error: 'Not a member' });
-    const { data: rows } = await supabase.from('group_messages').select('reactions')
+    const { data: rows } = await supabase.from('group_messages')
+      .select('reactions, sender_id, content, message_type')
       .eq('id', req.params.messageId).eq('group_id', req.params.groupId);
     if (!rows || rows.length === 0) return res.json({ success: false, error: 'Not found' });
     const reactions = { ...(rows[0].reactions || {}) };
@@ -3704,6 +3817,12 @@ app.post('/api/groups/:groupId/messages/:messageId/react', authRequired, async (
     for (const uid of members) {
       emitToUser(uid, 'group_message_reaction',
         { group_id: req.params.groupId, message_id: req.params.messageId, reactions });
+    }
+    if (!already) {
+      notifyReaction(rows[0].sender_id, req.userId, emoji, {
+        group_id: req.params.groupId, message_id: req.params.messageId,
+        preview: previewOf(rows[0]),
+      });
     }
     res.json({ success: true, data: reactions });
   } catch (e) { res.json({ success: false, error: e.message }); }
