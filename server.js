@@ -746,6 +746,7 @@ app.post('/api/users/:userId/update', authRequired, async (req, res) => {
     username, bio, avatar_url, headline, about, location, work, website,
     education, birthday, first_name, last_name, middle_name, gender,
     birthplace, relationship, skills, hidden_fields, fav_track,
+    profile_background,
   } = req.body;
   try {
     // Only update fields that were actually sent (partial updates supported).
@@ -771,6 +772,10 @@ app.post('/api/users/:userId/update', authRequired, async (req, res) => {
     // Favorite track (Telegram-style profile music): ONLY the Rhythm catalog
     // link {url,title,artist,art,dur} — never an audio file. null clears it.
     if (fav_track !== undefined) update.fav_track = fav_track;
+    // Animated profile background preset id (or null to clear). Visible to
+    // anyone viewing the profile, not just the owner — so unlike chat
+    // wallpaper (local-only, personal) this has to live server-side.
+    if (profile_background !== undefined) update.profile_background = profile_background;
     const { data, error } = await supabase.from('users').update(update).eq('id', req.params.userId).select();
     if (error) throw error;
     res.json({ success: true, data: data[0] });
